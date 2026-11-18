@@ -71,7 +71,7 @@ function caller(req) {
     if (!key || key.revoked) return null;
     const a = S.agents[key.handle];
     a.last_seen = Date.now(); // presence: the UI shows who's online before you hire them
-    return { type: "agent", id: a.handle, label: `@${a.handle}`, agent: a, principal: a.owner_id, scopes: a.status === "active" ? key.scopes : [] };
+    return { type: "agent", id: a.handle, label: fullName(a.handle), agent: a, principal: a.owner_id, scopes: a.status === "active" ? key.scopes : [] };
   }
   const session = readCookie(req, "cr_session");
   const s = session && S.sessions[sha256(session)];
@@ -97,6 +97,20 @@ const ownedAgent = (me, handle) => {
 
 // ---------- views ----------
 const userName = (id) => S.users[id]?.name ?? "unknown";
+// Names: agents are shown as owner/agent ("northwind/prospector") so you always see who runs an agent.
+// Agent handles stay globally unique, so the bare handle still works everywhere in the API.
+const ownerHandle = (h) => (S.agents[h]?.owner_id ? S.users[S.agents[h].owner_id]?.handle ?? "unknown" : "unclaimed");
+const fullName = (h) => `${ownerHandle(h)}/${h}`;
+const resolveAgent = (ref) => {
+  const [owner, h] = String(ref ?? "").replace(/^@/, "").includes("/") ? String(ref).replace(/^@/, "").split("/") : [null, String(ref ?? "").replace(/^@/, "")];
+  return S.agents[h] && (!owner || ownerHandle(h) === owner) ? S.agents[h] : null;
+};
+function userHandle(name) {
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "user";
+  let h = base;
+  for (let i = 2; Object.values(S.users).some((u) => u.handle === h) || h === "unclaimed"; i++) h = `${base}-${i}`;
+  return h;
+}
 function reputation(handle) {
   const jobs = Object.values(S.jobs);
   return {
@@ -107,7 +121,9 @@ function reputation(handle) {
   };
 }
 const publicAgent = (a) => ({
-  handle: a.handle, name: a.name, bio: a.bio, owner: userName(a.owner_id), status: a.status, capabilities: a.caps,
+  handle: a.handle, full_name: fullName(a.handle), owner_handle: ownerHandle(a.handle),
+  owner_verified: !!(S.users[a.owner_id] && (S.users[a.owner_id].demo || (S.users[a.owner_id].email && !S.users[a.owner_id].guest))),
+  name: a.name, bio: a.bio, owner: userName(a.owner_id), status: a.status, capabilities: a.caps,
   demo: !!a.demo, reputation: reputation(a.handle), created_at: a.created_at,
   online: (a.last_seen ?? 0) > Date.now() - 60000, last_seen: a.last_seen ?? null,
 });
@@ -172,7 +188,7 @@ function settle(j) {
   if (rest > 0) move(escrow, `user:${j.payer}`, rest, "refund", { job_id: j.id });
   if (j.status === "succeeded") issueReceipt(j);
   log(j, j.status === "succeeded"
-    ? `Paid @${j.executor} ${usd(j.price - Math.round((j.price * PLATFORM_FEE_PCT) / 100))}. Receipt signed.`
+    ? `Paid ${fullName(j.executor)} ${usd(j.price - Math.round((j.price * PLATFORM_FEE_PCT) / 100))}. Receipt signed.`
     : `Refunded ${usd(rest)} to ${userName(j.payer)}.${j.verdicts.length ? " Verifiers paid for their checks." : ""}`, "money", { amount: rest });
 }
 
@@ -182,11 +198,11 @@ function issueReceipt(j) {
     v: 1, id: `rcpt_${j.id.slice(4)}`, job_id: j.id, issued_at: new Date().toISOString(),
     task: { capability: j.capability, policy: j.policy, description: j.task },
     note: "Verifier entries are attestations: each verifier reports the sha256 it reached. Inputs and output are not included.",
-    requester: j.requester.label, payer: userName(j.payer), executor: `@${j.executor}`, executor_owner: userName(S.agents[j.executor].owner_id),
+    requester: j.requester.label, payer: userName(j.payer), executor: `${fullName(j.executor)}`, executor_owner: userName(S.agents[j.executor].owner_id),
     executor_claimed: j.claim,
     output_sha256: j.result.sha256,
     server_checks: { passed: j.checks.filter((c) => c.passed).length, total: j.checks.length },
-    verifiers: j.verdicts.map((v) => ({ agent: `@${v.by}`, owner: userName(S.agents[v.by].owner_id), sha256: v.sha256, verdict: v.verdict })),
+    verifiers: j.verdicts.map((v) => ({ agent: fullName(v.by), owner: userName(S.agents[v.by].owner_id), sha256: v.sha256, verdict: v.verdict })),
     payment: { mode: "test", currency: "usd", price: j.price, platform_fee: fee, executor_payout: j.price - fee, verifier_fees: j.verdicts.length * j.verifier_fee },
   };
   S.receipts[receipt.id] = { receipt, signature: signReceipt(receipt, KEYS.privateKey) };
@@ -214,7 +230,7 @@ route("POST /v1/auth/login", (req, b, _p, res) => {
   return startSession(res, req, u);
 });
 route("POST /v1/auth/guest", (req, _b, _p, res) => {
-  limit(`guest:${ip(req)}`, 20, 3600);
+  limit(`guest:${ip(req)}`, 60, 3600);
   return startSession(res, req, newUser(`Guest ${Math.floor(1000 + Math.random() * 9000)}`, null, null, true));
 });
 route("POST /v1/auth/logout", (req, _b, _p, res) => {
@@ -225,7 +241,7 @@ route("POST /v1/auth/logout", (req, _b, _p, res) => {
 });
 
 function newUser(name, email, password, guest = false) {
-  const u = { id: newId("usr"), name, email, password, guest, created_at: Date.now() };
+  const u = { id: newId("usr"), name, handle: userHandle(guest ? name.replace("Guest ", "guest-") : name), email, password, guest, created_at: Date.now() };
   S.users[u.id] = u;
   move("outside", `user:${u.id}`, 2000, "welcome_credit", { memo: "Test-mode welcome credit" });
   activity("join", `${name} joined.`);
@@ -249,10 +265,11 @@ route("GET /v1/me", (req) => {
 // Agents
 route("GET /v1/agents", (_req, _b, _p, _r, q) =>
   Object.values(S.agents).filter((a) => a.status !== "pending" && (!q.get("capability") || offers(a, q.get("capability")))).map(publicAgent));
+route("GET /v1/agents/:owner/:handle", (req, b, p, res, q) => R["GET /v1/agents/:handle"](req, b, { handle: resolveAgent(`${p.owner}/${p.handle}`)?.handle ?? "-" }, res, q));
 route("GET /v1/agents/:handle", (_req, _b, p) => {
   const a = S.agents[p.handle];
   need(a && a.status !== "pending", 404, "agent_not_found", `There's no agent @${p.handle}.`);
-  const receipts = Object.values(S.receipts).filter((r) => r.receipt.executor === `@${a.handle}` || r.receipt.verifiers.some((v) => v.agent === `@${a.handle}`));
+  const receipts = Object.values(S.receipts).filter((r) => S.jobs[r.receipt.job_id]?.executor === a.handle || S.jobs[r.receipt.job_id]?.verdicts.some((v) => v.by === a.handle));
   return { ...publicAgent(a), receipts: receipts.slice(-10).reverse().map((r) => r.receipt) };
 });
 
@@ -285,7 +302,7 @@ route("POST /v1/agents", (req, b) => {
   const a = newAgent(b, me.id, "active");
   const scopes = Array.isArray(b.scopes) ? SCOPES.filter((s) => b.scopes.includes(s)) : [];
   if (b.spend_limit !== undefined) a.spend_limit = int(b.spend_limit, "spend_limit", 0, 1000000);
-  activity("join", `${me.label} added agent @${a.handle}.`);
+  activity("join", `${me.label} added agent ${fullName(a.handle)}.`);
   return { agent: publicAgent(a), api_key: issueKey(a.handle, scopes), note: "Store this key now. It's shown only once." };
 });
 
@@ -317,7 +334,7 @@ route("POST /v1/claims/:code", (req, b, p) => {
   a.spend_limit = b.spend_limit === undefined ? 2000 : int(b.spend_limit, "spend_limit", 0, 1000000);
   const scopes = Array.isArray(b.scopes) ? SCOPES.filter((s) => b.scopes.includes(s)) : [];
   for (const k of Object.values(S.keys)) if (k.handle === a.handle && !k.revoked) k.scopes = scopes;
-  activity("join", `${me.label} claimed @${a.handle}.`);
+  activity("join", `${me.label} claimed ${fullName(a.handle)}.`);
   return publicAgent(a);
 });
 
@@ -337,7 +354,7 @@ route("PATCH /v1/agents/:handle", (req, b, p) => {
   }
   if (b.spend_limit !== undefined) a.spend_limit = int(b.spend_limit, "spend_limit", 0, 1000000);
   if (b.paused !== undefined) { bad(typeof b.paused === "boolean", "paused must be true or false.", "paused"); a.status = b.paused ? "paused" : "active"; }
-  activity("owner", `${me.label} updated @${a.handle}'s permissions.`);
+  activity("owner", `${me.label} updated ${fullName(a.handle)}'s permissions.`);
   return { ...publicAgent(a), spend_limit: a.spend_limit, scopes: Object.values(S.keys).find((k) => k.handle === a.handle && !k.revoked)?.scopes ?? [] };
 });
 route("POST /v1/agents/:handle/keys", (req, _b, p) => {
@@ -378,7 +395,7 @@ route("POST /v1/jobs", (req, b) => {
   const verifiers_required = b.verifiers_required === undefined ? 2 : int(b.verifiers_required, "verifiers_required", 0, 3);
   let executor = null, price;
   if (b.executor) {
-    const ex = S.agents[String(b.executor).replace(/^@/, "")];
+    const ex = resolveAgent(b.executor);
     bad(ex?.status === "active" && offers(ex, b.capability), `@${b.executor} isn't an active agent that offers ${b.capability}.`, "executor");
     need(ex.owner_id !== me.principal, 403, "self_dealing", "You can't hire an agent you own. Reputation only counts work for someone else.");
     executor = ex.handle;
@@ -387,7 +404,7 @@ route("POST /v1/jobs", (req, b) => {
   const notes = typeof b.notes === "string" ? b.notes.slice(0, 2000) : "";
   const hold = price + verifiers_required * VERIFIER_FEE;
   if (me.type === "agent") need(spentToday(me.id) + hold <= me.agent.spend_limit, 402, "spend_limit",
-    `This would take @${me.id} past its daily spend limit of ${usd(me.agent.spend_limit)} (spent ${usd(spentToday(me.id))} today). Its owner can raise it.`);
+    `This would take ${me.label} past its daily spend limit of ${usd(me.agent.spend_limit)} (spent ${usd(spentToday(me.id))} today). Its owner can raise it.`);
   need(balance(`user:${me.principal}`) >= hold, 402, "insufficient_funds", `This job holds ${usd(hold)} in escrow; the available balance is ${usd(balance(`user:${me.principal}`))}.`);
   const j = {
     id: newId("job"), capability: b.capability, task: cap.describe(inputs), title: typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, 120) : cap.describe(inputs),
@@ -404,7 +421,7 @@ route("POST /v1/jobs", (req, b) => {
   S.jobs[j.id] = j;
   move(`user:${me.principal}`, `escrow:${j.id}`, hold, "escrow_hold", { job_id: j.id, agent_payer: me.type === "agent" ? me.id : null });
   log(j, executor
-    ? `${me.label} hired @${executor} for ${usd(price)}. ${usd(hold)} held in escrow.`
+    ? `${me.label} hired ${fullName(executor)} for ${usd(price)}. ${usd(hold)} held in escrow.`
     : `${me.label} posted an open job for ${usd(price)}. ${usd(hold)} held in escrow.`, "hire", { from: me.id, to: executor });
   return publicJob(j, me);
 });
@@ -430,7 +447,7 @@ route("POST /v1/jobs/:id/claim", (req, _b, p) => {
   j.executor = me.id;
   j.status = "assigned";
   j.deadline_at = Date.now() + STAGE_MS;
-  log(j, `@${me.id} claimed the job.`, "claim", { from: me.id });
+  log(j, `${me.label} claimed the job.`, "claim", { from: me.id });
   return publicJob(j, me);
 });
 
@@ -445,7 +462,7 @@ route("POST /v1/jobs/:id/result", (req, b, p) => {
   j.result = { output_csv: b.output_csv, sha256: b.sha256, summary: b.summary ?? null };
   j.checks = CAPS[j.capability].check(j.inputs, j.result);
   const failed = j.checks.filter((c) => !c.passed);
-  log(j, `@${me.id}: "${j.claim || "Done."}"`, "claim", { from: me.id });
+  log(j, `${me.label}: "${j.claim || "Done."}"`, "claim", { from: me.id });
   if (failed.length) {
     j.status = "failed";
     log(j, `Gate 1 rejected the work: ${failed.length} of ${j.checks.length} checks failed (${failed.map((c) => c.label.toLowerCase()).join("; ")}).`, "rejected", { from: "server", to: me.id });
@@ -460,7 +477,7 @@ route("POST /v1/jobs/:id/result", (req, b, p) => {
     }
     j.status = "verifying";
     j.deadline_at = Date.now() + STAGE_MS;
-    log(j, `Verifiers assigned: ${j.verifiers.map((h) => `@${h} (${userName(S.agents[h].owner_id)})`).join(", ")}.`, "job");
+    log(j, `Verifiers assigned: ${j.verifiers.map((h) => fullName(h)).join(", ")}.`, "job");
     log(j, `Gate 1 passed all ${j.checks.length} checks. Waiting for ${j.verifiers_required} independent verifiers.`, "gate", { from: me.id, to: "server" });
   } else {
     j.status = "succeeded";
@@ -486,7 +503,7 @@ route("POST /v1/jobs/:id/verdicts", (req, b, p) => {
   const counted = b.verdict === "pass" && b.sha256 === j.result.sha256 ? "pass" : "fail";
   j.verdicts.push({ by: me.id, owner: userName(me.principal), verdict: b.verdict, sha256: b.sha256, counted, note: typeof b.note === "string" ? b.note.slice(0, 280) : "", at: Date.now() });
   const passes = j.verdicts.filter((v) => v.counted === "pass").length;
-  log(j, `@${me.id} ${counted === "pass" ? "verified" : "rejected"} the work${counted !== b.verdict ? " (said pass, but its hash doesn't match)" : ""}. ${passes}/${j.verifiers_required}.`,
+  log(j, `${me.label} ${counted === "pass" ? "verified" : "rejected"} the work${counted !== b.verdict ? " (said pass, but its hash doesn't match)" : ""}. ${passes}/${j.verifiers_required}.`,
     counted === "pass" ? "verdict" : "rejected", { from: me.id, to: "server" });
   if (counted === "fail" || passes >= j.verifiers_required) {
     j.status = counted === "fail" ? "failed" : "succeeded";
@@ -517,7 +534,7 @@ setInterval(() => {
     if (!["open", "assigned", "verifying"].includes(j.status) || !(j.deadline_at < Date.now())) continue;
     const stage = j.status;
     j.status = "expired";
-    log(j, stage === "open" ? "No agent claimed the job in time." : stage === "assigned" ? `@${j.executor} didn't deliver before the deadline.` : "Not every assigned verifier answered in time.", "rejected");
+    log(j, stage === "open" ? "No agent claimed the job in time." : stage === "assigned" ? `${fullName(j.executor)} didn't deliver before the deadline.` : "Not every assigned verifier answered in time.", "rejected");
     settle(j);
     save();
   }
@@ -667,7 +684,7 @@ route("POST /v1/demo/:scenario", async (req, _b, p) => {
 
 // ---------- plumbing ----------
 // Only trust the proxy's client-IP header when we're actually behind it (TRUST_PROXY=1); otherwise anyone could set it.
-const ip = (req) => (process.env.TRUST_PROXY === "1" && req.headers["cf-connecting-ip"]) || req.socket.remoteAddress;
+const ip = (req) => (process.env.TRUST_PROXY === "1" && (req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.headers["cf-connecting-ip"])) || req.socket.remoteAddress;
 const origin = (req) => process.env.PUBLIC_URL || `${req.headers["x-forwarded-proto"] ?? "http"}://${req.headers.host}`;
 const hits = new Map();
 function limit(key, max, seconds) {
@@ -786,6 +803,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 // ---------- demo world ----------
+// Backfill: data saved before users had handles gets them on startup.
+for (const u of Object.values(S.users)) u.handle ??= u.demo ? u.id.slice(4) : userHandle(u.name);
 if (!S.seeded) {
   const { seedWorld } = await import("./lib/demo.mjs");
   seedWorld();
