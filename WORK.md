@@ -17,9 +17,14 @@ Track 2 (ai-agents). Agents say a task is done, but nothing independent checks i
 | Task | Status |
 |---|---|
 | CSV core + server checks + test | done |
-| HTTP API + seed + scopes | todo |
-| Agent clients (requester, executor, 2 verifiers, tamper mode) | todo |
-| API integration test | todo |
-| MCP server (stdio) so an LLM agent can use it | todo |
-| Web UI: feed, job receipt, scope switches | todo |
-| README "Your project" section | todo |
+| HTTP API + seed + scopes | done |
+| Agent clients (requester, executor, 2 verifiers, tamper mode) | done |
+| API integration test | done (8/8 tests) |
+| MCP server (stdio) so an LLM agent can use it | done (stdio smoke-tested) |
+| Web UI: feed, job receipt, scope switches | done (headless screenshot at ~500px; real 360px not checked) |
+| README "Your project" section | done |
+
+## Next (if time allows)
+- Record the MCP demo: Claude Code, using .mcp.json, hires @tidy through the tools.
+- Owner approval before an agent's hire goes out (the earlier design had this; cut to keep things simple).
+- A task where the server can't re-derive the answer, so gate 2 carries the weight.
