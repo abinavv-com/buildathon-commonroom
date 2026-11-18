@@ -3,28 +3,24 @@
 Every session reads this first and updates it before stopping.
 
 ## Goal
-Track 2 (ai-agents). Agents say a task is done, but nothing independent checks it. In Commonroom, an agent hires another agent for a sandboxed `csv.dedupe` job. The result is accepted only after two gates:
-1. The server re-derives the answer and runs its own checks.
-2. A quorum of verifier agents, owned by someone other than the executor's owner, recompute the result and agree.
+Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked and paid work: agents hire agents from asks, escrow holds the money, the server re-checks the work (gate 1), a roster of independent verifiers attests (gate 2), then payout and an Ed25519-signed receipt. Reputation comes from receipts, not upvotes.
 
 ## Decisions (18 Nov 2026)
-- Simple by design: Node 22 standard library only. No dependencies, no build step.
-- State lives in memory and is saved to `.data/state.json`. Delete `.data/` to reset.
-- All code is written in this fork during the event. Nothing is copied from earlier projects.
-- Commits carry no AI co-author trailer.
+- Reverse-engineered Moltbook from its public skill.md and press coverage. We keep the shape: self-registration, a human claim, rooms/posts/votes, rate limits.
+- We fix Moltbook's flaws:
+  - The check-in is a data-only `GET /v1/home`, not a heartbeat file the agent follows.
+  - Reputation comes from receipts, not upvotes.
+  - A guard blocks any write that carries a secret.
+  - Posts that read like instructions to agents are flagged.
+- Payments: test-mode double-entry ledger with escrow, a 10% platform fee and verifier fees. Stripe Connect is the planned upgrade.
+- Hosting: a Cloudflare quick tunnel from this laptop (the user's choice), plus a Dockerfile. Vercel was rejected because the app is one stateful process with disk state, timers and SSE.
+- Applied from the external review: per-job verifier roster with distinct owners; blind dedupe verifiers; inconsistent-verdict rejection; parties-only inputs and outputs; Origin check and server-side session expiry; deadlines and a sweeper; policy versions in receipts; bounded MCP bodies with no batches.
+- No AI co-author trailer on commits. No code copied from earlier projects.
 
-## Tasks
-| Task | Status |
-|---|---|
-| CSV core + server checks + test | done |
-| HTTP API + seed + scopes | done |
-| Agent clients (requester, executor, 2 verifiers, tamper mode) | done |
-| API integration test | done (8/8 tests) |
-| MCP server (stdio) so an LLM agent can use it | done (stdio smoke-tested) |
-| Web UI: feed, job receipt, scope switches | done (headless screenshot at ~500px; real 360px not checked) |
-| README "Your project" section | done |
-
-## Next (if time allows)
-- Record the MCP demo: Claude Code, using .mcp.json, hires @tidy through the tools.
-- Owner approval before an agent's hire goes out (the earlier design had this; cut to keep things simple).
-- A task where the server can't re-derive the answer, so gate 2 carries the weight.
+## Status
+| Task | Owner | Status |
+|---|---|---|
+| Backend: auth, social, agents, wallet, jobs, receipts, guard, SSE, scenarios | coordinator | done; 9/9 tests; all 3 scenarios verified via the API |
+| Frontend (all pages, receipt printer, 21st.dev-adapted elements) | frontend subagent | in progress |
+| MCP (HTTP + stdio), skill.md, llms.txt, agents/run.mjs, verify-receipt.mjs | agent-platform subagent | in progress |
+| Hosting via Cloudflare tunnel | coordinator | after the frontend lands |
