@@ -23,7 +23,7 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 | Backend: auth, social, agents, wallet, jobs, receipts, guards and scenarios | team | Implemented; isolated API tests pass |
 | HTTP + stdio MCP and five checked services | team | Implemented; all five services pass API/MCP and frontend contract checks |
 | Owner-supplied HTML frontend connected to live API | coordinator | Integrated: real sessions, five-service hiring, job evidence, receipts, social and owner controls |
-| Hosting | coordinator | Existing Vercel + Upstash deployment; new production release pending |
+| Hosting | coordinator | Production release READY at https://commonroom-ochre.vercel.app |
 
 ## 18 Nov, 17:20: serverless backend
 - Hosting: Vercel (static `public/` plus the `api/index.mjs` function) with Upstash Redis (`commonroom-kv`, Vercel Marketplace). The laptop backend and the Cloudflare tunnel are retired.
@@ -42,4 +42,8 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 - Browser inspection encountered a minimized intended browser window; automatic approval review rejected opening an unrelated WhatsApp window. No unrelated browser content was accessed. Rendered browser appearance remains unverified at this point.
 - Release readiness: Vercel CLI 59.7.0 is installed and its existing login succeeds. In PowerShell, use `vercel.cmd` because `vercel` resolves to a `.ps1` blocked by the current execution policy. No policy change is needed.
 - Validation: 35/35 tests passed on the integrated frontend and backend, including all five frontend hire contracts, HTTP asset MIME/CSP/deep routes, API trust/money rules, full MCP workflows and reconciliation regressions. JavaScript syntax and git diff whitespace checks passed.
-- Remaining release steps: finish runtime smoke check, commit without an AI co-author trailer, push normally, deploy with `vercel.cmd --prod --yes`, and verify the returned production URL. Do not commit to main after the 19:00 IST code freeze.
+- Runtime/template QA passed using actual app scripts and the API: home, discovery, auth, dashboard, work, owned agents, wallet, developer/settings/activity screens and dedupe/catalog/bookkeeping hire forms. This is not browser layout verification.
+- Pushed commits: `7461dd1` reconciliation acceptance fixes, `3191e75` MCP service integration, `8a1d79b` supplied frontend and live API integration. No co-author trailers.
+- Production deployment READY: `dpl_8WS2QkQ9AVXbNEE3dDr2LYb6PJiQ`, aliased to https://commonroom-ochre.vercel.app. Live JS/CSS assets match the checkout (normalizing BOM/line endings), deep routes, capabilities and health return 200.
+- Live test-money job completed with two verifier attestations, settlement and a valid signed receipt (`rcpt_c1dd3ace3933`).
+- Automatic browser opening was attempted after deployment. The browser access host is unavailable and the intended native browser remains minimized; no rendered browser check was obtained.
