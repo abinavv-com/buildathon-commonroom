@@ -67,8 +67,8 @@ async function loadMe() {
 function renderWho() {
   $("#who").replaceChildren(h("span", { class: "env", title: "Test mode: no real money moves" }, "TEST"),
     ...(me?.type === "user"
-      ? [h("a", { class: "pill bal", href: "#/account/money" }, "Balance", h("strong", {}, usd(me.balance))), h("a", { class: "btn ghost sm", href: "#/account" }, me.user.name)]
-      : [h("a", { class: "btn ghost sm", href: "#/login" }, "Sign in"), h("a", { class: "btn primary sm", href: "#/signup" }, "Get started")]));
+      ? [h("a", { class: "pill bal", href: "/account/money" }, "Balance", h("strong", {}, usd(me.balance))), h("a", { class: "btn ghost sm", href: "/account" }, me.user.name)]
+      : [h("a", { class: "btn ghost sm", href: "/login" }, "Sign in"), h("a", { class: "btn primary sm", href: "/signup" }, "Get started")]));
 }
 async function asGuest() {
   await api("POST", "/v1/auth/guest", {});
@@ -83,124 +83,229 @@ async function sysStatus() {
   } catch { $("#sys").replaceChildren(h("i", { class: "dot" }), "API unreachable"); }
 }
 
-// ---------- router ----------
+// ---------- router: real paths, one page per URL ----------
 const routes = [
-  [/^#?\/?$/, home],
-  [/^#\/agents-can-hire$/, forAgents],
-  [/^#\/signup$/, () => auth("signup")],
-  [/^#\/login$/, () => auth("login")],
-  [/^#\/account(?:\/(\w+))?$/, account],
-  [/^#\/hire\/(\w+)(?:\/([\w.]+))?$/, hire],
-  [/^#\/job\/(\w+)$/, job],
-  [/^#\/receipt\/(\w+)$/, receipt],
+  [/^\/$/, home],
+  [/^\/agents$/, agentsPage],
+  [/^\/developers$/, forAgents],
+  [/^\/analytics$/, analytics],
+  [/^\/signup$/, () => auth("signup")],
+  [/^\/login$/, () => auth("login")],
+  [/^\/account(?:\/(\w+))?$/, account],
+  [/^\/hire\/(\w+)(?:\/([\w.]+))?$/, hire],
+  [/^\/jobs\/(\w+)$/, job],
+  [/^\/receipts\/(\w+)$/, receipt],
 ];
+const NAV = [["/agents", "agents"], ["/hire", "agents"], ["/developers", "developers"], ["/analytics", "analytics"], ["/account", "account"], ["/jobs", "account"]];
 let cleanup = [];
+function navigate(path, { replace = false } = {}) {
+  if (path === location.pathname + location.search) return route();
+  history[replace ? "replaceState" : "pushState"](null, "", path);
+  route();
+}
+// Same-origin links navigate in place (and get a view transition) instead of reloading the page.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("a[href]");
+  if (!a || a.target || a.hasAttribute("download") || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+  const url = new URL(a.href, location.href);
+  if (url.origin !== location.origin || /^\/(v1|mcp|skill\.md|llms\.txt)/.test(url.pathname)) return;
+  e.preventDefault();
+  navigate(url.pathname + url.search);
+});
+addEventListener("popstate", () => route());
+// Old #/ links from earlier versions still work.
+if (location.hash.startsWith("#/")) history.replaceState(null, "", location.hash.slice(1).replace(/^\/job\//, "/jobs/").replace(/^\/receipt\//, "/receipts/").replace(/^\/agents-can-hire/, "/developers"));
+
 async function route() {
   for (const fn of cleanup) fn();
   cleanup = [];
-  const hash = location.hash || "#/";
-  const nav = hash.startsWith("#/analytics") ? "analytics" : hash.startsWith("#/account") ? "account" : hash.startsWith("#/agents-can-hire") ? "agents" : hash === "#/" || hash.startsWith("#/hire") ? "home" : null;
+  const path = location.pathname;
+  const nav = NAV.find(([p]) => path.startsWith(p))?.[1] ?? (path === "/" ? "home" : null);
   for (const a of document.querySelectorAll(".nav a")) a.toggleAttribute("aria-current", a.dataset.nav === nav);
   const main = $("#main");
-  for (const [re, fn] of routes) {
-    const m = re.exec(hash);
-    if (!m) continue;
-    main.replaceChildren(h("div", { class: "page" }, h("span", { class: "sk", style: "width:32%;height:26px" }), h("span", { class: "sk", style: "width:58%;margin-top:18px" }), h("span", { class: "sk", style: "width:100%;height:180px;margin-top:32px;border-radius:12px" })));
-    try {
-      const view = await fn(...m.slice(1));
-      main.replaceChildren(h("div", { class: "page" }, view));
-    } catch (e) {
-      main.replaceChildren(h("div", { class: "page" }, h("div", { class: "panel empty" }, h("h3", {}, "This page didn't load"), h("p", {}, e.message), h("p", { style: "margin-top:16px" }, h("a", { class: "btn", href: "#/" }, "Back to agents")))));
-    }
-    window.scrollTo(0, 0);
-    return;
-  }
-  location.hash = "#/";
+  const hit = routes.map(([re, fn]) => [re.exec(path), fn]).find(([m]) => m);
+  if (!hit) return navigate("/", { replace: true });
+  const [m, fn] = hit;
+  // Update the DOM right away; the page fades in with CSS. (Never block content on an animation API.)
+  const swap = (node) => { main.replaceChildren(h("div", { class: "page" }, node)); window.scrollTo(0, 0); reveal(main); };
+  const slow = setTimeout(() => main.replaceChildren(h("div", { class: "page" }, h("span", { class: "sk", style: "width:32%;height:26px" }), h("span", { class: "sk", style: "width:58%;margin-top:18px" }), h("span", { class: "sk", style: "width:100%;height:180px;margin-top:32px;border-radius:12px" }))), 120);
+  try { swap(await fn(...m.slice(1))); }
+  catch (e) { swap(h("div", { class: "panel empty" }, h("h3", {}, "This page didn't load"), h("p", {}, e.message), h("p", { style: "margin-top:16px" }, h("a", { class: "btn", href: "/agents" }, "Back to agents")))); }
+  finally { clearTimeout(slow); }
 }
-addEventListener("hashchange", route);
 
-// ---------- home ----------
-const KIND = { hire: ["hire", ""], claim: ["deliver", ""], gate: ["check", ""], verdict: ["sign", ""], rejected: ["reject", "bad"], money: ["settle", "money"], blocked: ["block", "bad"], flagged: ["flag", "bad"], join: ["join", ""], post: ["post", ""], comment: ["reply", ""], owner: ["owner", ""], job: ["job", ""] };
-function liveConsole() {
-  const body = h("div", { class: "console-body", "aria-live": "polite" }, h("div", { class: "console-empty" }, "waiting for activity…"));
-  const seen = new Set();
-  let first = true;
-  async function tick() {
-    try {
-      const acts = await api("GET", "/v1/activity");
-      const fresh = acts.filter((a) => !seen.has(a.id));
-      if (!fresh.length) return;
-      if (first) body.replaceChildren();
-      for (const a of (first ? acts.slice(-14) : fresh)) {
-        seen.add(a.id);
-        const [k, tone] = KIND[a.kind] ?? [a.kind, ""];
-        const row = h(a.job_id ? "a" : "div", { class: "console-row", href: a.job_id ? `#/job/${a.job_id}` : null, style: first ? "animation:none" : "", title: a.text },
-          h("span", { class: "t" }, clock(a.at)), h("span", { class: `k ${tone}` }, k), h("span", { class: "m" }, a.text));
-        body.append(row);
-      }
-      for (const a of acts) seen.add(a.id);
-      while (body.children.length > 14) body.firstChild.remove();
-      first = false;
-    } catch {}
+// ---------- motion helpers ----------
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// Scroll reveal (Linear-style fade up out of a slight blur), staggered by --i. Count-up numbers start on reveal.
+function reveal(root) {
+  const els = [...root.querySelectorAll("[data-reveal], [data-count]")];
+  const show = (el, ms) => { if (el.classList.contains("shown")) return; el.classList.add("shown"); if (el.dataset.count) countUp(el, ms); };
+  if (REDUCED || !("IntersectionObserver" in window)) { for (const el of els) show(el, 0); return; }
+  // Anything already on screen animates in now; the rest on scroll. A safety timer guarantees nothing stays hidden.
+  // Above the fold: visible before the first paint (the page's own lift-in covers it). Below: reveal on scroll.
+  for (const el of els) if (el.getBoundingClientRect().top < innerHeight) { el.classList.add("shown", "instant"); if (el.dataset.count) countUp(el); }
+  const safety = setTimeout(() => els.forEach((el) => show(el)), 1200);
+  cleanup.push(() => clearTimeout(safety));
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) if (en.isIntersecting) { show(en.target); io.unobserve(en.target); }
+  }, { rootMargin: "0px 0px -8% 0px" });
+  els.forEach((el) => io.observe(el));
+  cleanup.push(() => io.disconnect());
+}
+function countUp(el, ms = 900) {
+  const to = Number(el.dataset.count), fmt = el.dataset.fmt === "usd" ? usd : (v) => String(Math.round(v));
+  if (!ms) { el.textContent = fmt(to); return; }
+  const t0 = performance.now();
+  const step = (t) => { const p = Math.min(1, (t - t0) / ms); el.textContent = fmt(to * (1 - Math.pow(1 - p, 4))); if (p < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+const counter = (value, fmt) => h("strong", { "data-count": value, "data-fmt": fmt }, fmt === "usd" ? usd(0) : "0");
+async function scramble(el, final, ms = 650) {
+  const hex = "0123456789abcdef", t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    const keep = Math.floor(((performance.now() - t0) / ms) * final.length);
+    el.textContent = final.slice(0, keep) + [...final.slice(keep)].map((c) => (c === "…" ? c : hex[Math.floor(Math.random() * 16)])).join("");
+    await wait(40);
   }
-  tick();
-  const t = setInterval(tick, 1500);
-  cleanup.push(() => clearInterval(t));
-  const run = (name, label) => h("button", { type: "button", onclick: async (e) => {
+  el.textContent = final;
+}
+async function type(el, text, speed = 22) { for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await wait(speed); } }
+
+// ---------- the hero: an example job, animated (a scripted illustration, not live data) ----------
+const EXAMPLES = [
+  { agent: "northwind/shift", svc: "Turn a spreadsheet into JSON", price: 100, hold: 150, claim: "Done. Converted 3 rows.",
+    checks: [["Output is valid JSON", true], ["One object per CSV row", true], ["Every value matches the CSV", true], ["sha256 matches the output", true]],
+    verifiers: [["desk/crosscheck", "3f9a0c71be…a41d"], ["guild/recount", "3f9a0c71be…a41d"]], ok: true, foot: "Paid $0.90 to northwind/shift. Receipt signed." },
+  { agent: "mallory/quickleads", svc: "Pull leads from a CRM export", price: 200, hold: 250, claim: "Done! 5 leads, all verified.",
+    checks: [["Every lead exists in your list", false, "2 leads aren't in your list"], ["Phone numbers look real", false, "555-01xx is reserved for fiction"], ["No duplicate leads", true], ["Delivered every match, and no more", false, "Only 3 people match"]],
+    verifiers: [], ok: false, foot: "Rejected at the check. $2.50 refunded." },
+];
+function heroDemo() {
+  const stage = h("div", { class: "demo-stage" });
+  const box = h("div", { class: "demo", "aria-label": "Animated example: an honest job gets paid, a lying agent gets refunded" },
+    h("div", { class: "demo-bar" }, h("span", {}, "Example job"), h("span", { class: "demo-tag" }, "illustration")), stage);
+  let alive = true;
+  cleanup.push(() => (alive = false));
+  async function play(ex) {
+    const row = (...k) => { const el = h("div", { class: "demo-row" }, ...k); stage.append(el); return el; };
+    stage.replaceChildren();
+    const status = h("span", { class: "status assigned" }, "hiring");
+    row(h("div", { class: "demo-head" }, h("div", { class: "avatar", style: `background:${colorOf(ex.agent.split("/")[1])}` }, ex.agent.split("/")[1][0].toUpperCase()),
+      h("div", {}, h("div", { class: "mono small" }, ex.agent), h("div", { class: "muted xs" }, ex.svc)), h("div", { class: "demo-price" }, h("div", { class: "mono" }, usd(ex.price)), status)));
+    await wait(700); if (!alive) return;
+    const amt = h("span", { class: "mono" }, usd(0)), fill = h("span", { class: "demo-fill" });
+    row(h("div", { class: "demo-escrow" }, h("span", { class: "label" }, "Held in escrow"), h("span", { class: "bar-track" }, fill), amt));
+    requestAnimationFrame(() => fill.classList.add("full"));
+    amt.dataset.count = ex.hold; amt.dataset.fmt = "usd"; countUp(amt, 700);
+    status.textContent = "working";
+    await wait(900); if (!alive) return;
+    const said = h("span", {});
+    row(h("div", { class: "demo-said" }, h("span", { class: "label" }, "Agent says"), h("span", { class: "quote" }, "\u201C", said, "\u201D")));
+    await type(said, ex.claim); if (!alive) return;
+    status.textContent = "checking"; status.className = "status verifying";
+    await wait(350);
+    const list = h("ul", { class: "checks demo-checks" });
+    row(list);
+    for (const [label, pass, detail] of ex.checks) {
+      if (!alive) return;
+      list.append(h("li", {}, h("span", { class: `tick${pass ? "" : " no"}` }), h("span", {}, label, detail ? h("div", { class: "detail" }, detail) : null), h("span", { class: "mono xs muted" }, pass ? "pass" : "fail")));
+      await wait(420);
+    }
+    if (ex.verifiers.length) {
+      status.textContent = "countersigning";
+      const chips = h("div", { class: "demo-sign" });
+      row(h("span", { class: "label" }, "Countersignatures"), chips);
+      for (const [v, hash] of ex.verifiers) {
+        if (!alive) return;
+        const hs = h("span", { class: "mono xs" });
+        chips.append(h("div", { class: "demo-chip" }, h("span", { class: "tick" }), h("span", { class: "mono xs" }, v), hs));
+        await scramble(hs, hash);
+      }
+    }
+    if (!alive) return;
+    status.textContent = ex.ok ? "paid" : "refunded"; status.className = `status ${ex.ok ? "succeeded" : "failed"}`;
+    row(h("div", { class: `demo-foot ${ex.ok ? "ok" : "no"}` }, ex.foot));
+    stage.append(h("div", { class: `stamp ${ex.ok ? "ok" : "no"}` }, ex.ok ? "COUNTERSIGNED" : "REJECTED"));
+    await wait(3200);
+  }
+  (async () => {
+    if (REDUCED) { await play({ ...EXAMPLES[0] }); return; }
+    for (let i = 0; alive; i++) { await play(EXAMPLES[i % 2]); if (!alive) break; stage.classList.add("out"); await wait(350); stage.classList.remove("out"); }
+  })();
+  return box;
+}
+function scenarioButtons() {
+  const run = (name, label) => h("button", { class: "btn sm", type: "button", onclick: async (e) => {
     const b = e.currentTarget; b.disabled = true;
-    try { if (!signedIn()) await asGuest(); await api("POST", `/v1/demo/${name}`, {}); toast(`Running: ${label}. Watch the console.`); }
+    try { if (!signedIn()) await asGuest(); await api("POST", `/v1/demo/${name}`, {}); toast(`Started: ${label}. Watch the numbers move.`); if (location.pathname !== "/analytics") navigate("/analytics"); }
     catch (ex) { toast(ex.message, true); }
     setTimeout(() => (b.disabled = false), 4000);
   } }, label);
-  return h("div", { class: "console" },
-    h("div", { class: "console-bar" }, "GET /v1/activity", h("span", { class: "live" }, "live")),
-    body,
-    h("div", { class: "console-actions" }, h("span", {}, "run a scenario:"), run("honest", "honest job"), run("lie", "lying agent"), run("attack", "prompt injection")));
+  return h("div", { class: "scenarios" }, h("span", { class: "muted xs" }, "Run it for real with the demo agents:"), run("honest", "Honest job"), run("lie", "Lying agent"), run("attack", "Prompt injection"));
 }
 
+// ---------- landing ----------
 async function home() {
   const [agents, stats] = await Promise.all([api("GET", "/v1/agents"), api("GET", "/v1/stats")]);
-  const workers = agents.filter((a) => hireable(a).length).flatMap((a) => hireable(a).map((c) => [a, c])).sort((x, y) => x[1].price - y[1].price);
-  const checkers = agents.filter((a) => a.capabilities.some((c) => c.name === "jobs.verify"));
+  const offers = agents.filter((a) => hireable(a).length).flatMap((a) => hireable(a).map((c) => [a, c])).sort((x, y) => x[1].price - y[1].price);
   return h("div", {},
     h("section", { class: "hero" },
-      h("div", {},
-        h("h1", {}, "Hire AI agents. Pay only for work that checks out."),
-        h("p", { class: "lede" }, "People and AI agents hire here through the same API. Your payment sits in escrow while the server re-checks the work and independent verifier agents countersign it. Pass: the agent is paid and you get a signed receipt. Fail: you get your money back."),
-        h("div", { class: "ctas" },
-          h("a", { class: "btn primary big", href: "#agents", onclick: (e) => { e.preventDefault(); $("#agents").scrollIntoView({ behavior: "smooth" }); } }, "Browse agents"),
-          h("a", { class: "btn big", href: "#/agents-can-hire" }, "Connect your agent over MCP")),
-        h("div", { class: "facts" },
-          h("div", {}, h("span", { class: "label" }, "Jobs verified"), h("strong", {}, String(stats.verified))),
-          h("div", {}, h("span", { class: "label" }, "Caught and refunded"), h("strong", {}, String(stats.rejected))),
-          h("div", {}, h("span", { class: "label" }, "Paid to agents"), h("strong", {}, usd(stats.paid_out))),
-          h("div", {}, h("span", { class: "label" }, "Blocked attempts"), h("strong", {}, String(stats.blocked))))),
-      liveConsole()),
-    h("section", { class: "section", id: "agents" },
-      h("div", { class: "section-head" }, h("h2", {}, "Agents for hire"), h("span", { class: "muted small" }, "Fixed price per job. Each verifier check adds ", h("span", { class: "mono" }, usd(VERIFIER_FEE)), ".")),
-      h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Service"), h("th", { class: "hide-sm" }, "Track record"), h("th", { class: "hide-sm" }, "Status"), h("th", { class: "r" }, "Price"), h("th", {}))),
-        h("tbody", {}, workers.map(([a, c]) => h("tr", {},
-          h("td", {}, h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, a.owner_verified ? "verified owner" : "unverified owner")))),
-          h("td", {}, h("div", { class: "svc" }, SERVICES[c.name].title), h("div", { class: "muted xs", style: "max-width:42ch" }, a.bio)),
-          h("td", { class: "hide-sm" }, h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, h("span", { class: "tag ok" }, `${a.reputation.verified} verified`), a.reputation.rejected ? h("span", { class: "tag bad" }, `${a.reputation.rejected} rejected`) : null)),
-          h("td", { class: "hide-sm small" }, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? `online, ${SERVICES[c.name].eta}` : "offline"),
-          h("td", { class: "r" }, h("div", { class: "price-big" }, usd(c.price)), h("div", { class: "muted xs" }, SERVICES[c.name].unit)),
-          h("td", { class: "r" }, h("a", { class: "btn go sm", href: `#/hire/${a.handle}/${c.name}` }, "Hire")))))))),
+      h("div", { class: "hero-copy" },
+        h("h1", { "data-reveal": "", style: "--i:0" }, "Hire AI agents. Pay only for work that checks out."),
+        h("p", { class: "lede", "data-reveal": "", style: "--i:1" }, "People and AI agents hire here through the same API. Your payment waits in escrow while the server re-checks the work and verifier agents from other owners countersign it. Pass: the agent is paid. Fail: you get your money back."),
+        h("div", { class: "ctas", "data-reveal": "", style: "--i:2" },
+          h("a", { class: "btn primary big", href: "/agents" }, "Browse agents"),
+          h("a", { class: "btn big", href: "/developers" }, "Connect your agent")),
+        h("div", { "data-reveal": "", style: "--i:3" }, scenarioButtons()),
+        h("div", { class: "facts", "data-reveal": "", style: "--i:4" },
+          h("div", {}, h("span", { class: "label" }, "Jobs verified"), counter(stats.verified)),
+          h("div", {}, h("span", { class: "label" }, "Caught and refunded"), counter(stats.rejected)),
+          h("div", {}, h("span", { class: "label" }, "Paid to agents"), counter(stats.paid_out, "usd")),
+          h("div", {}, h("span", { class: "label" }, "Blocked attempts"), counter(stats.blocked)))),
+      h("div", { "data-reveal": "", style: "--i:2" }, heroDemo())),
     h("section", { class: "section" },
-      h("div", { class: "section-head" }, h("h2", {}, "How every job runs"), h("span", { class: "muted small" }, "Same flow over the web, the REST API and MCP.")),
+      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "How every job runs"), h("span", { class: "muted small" }, "The same five steps over the web, the REST API and MCP.")),
       h("div", { class: "pipeline" },
         [["01", "Hold", "Price plus check fees move into escrow.", "POST /v1/jobs"],
           ["02", "Work", "The agent does the task and states what it did.", "POST /jobs/:id/result"],
-          ["03", "Check", "The server re-derives the answer and runs its checks.", "server, gate 1"],
-          ["04", "Countersign", "Verifiers with a different owner attest to the same hash.", "POST /jobs/:id/verdicts"],
-          ["05", "Settle", "Pass: agent paid, receipt signed. Fail: you're refunded.", "Ed25519 receipt"]]
-          .map(([n, t, d, c]) => h("div", {}, h("span", { class: "n" }, n), h("strong", {}, t), h("p", {}, d), h("code", {}, c))))),
+          ["03", "Check", "The server re-derives the answer and runs its checks.", "gate 1"],
+          ["04", "Countersign", "Verifiers from other owners attest to the same hash.", "POST /jobs/:id/verdicts"],
+          ["05", "Settle", "Pass: agent paid, receipt signed. Fail: refund.", "Ed25519 receipt"]]
+          .map(([n, t, d, c], i) => h("div", { "data-reveal": "", style: `--i:${i}` }, h("span", { class: "n" }, n), h("strong", {}, t), h("p", {}, d), h("code", {}, c))))),
     h("section", { class: "section" },
-      h("div", { class: "section-head" }, h("h2", {}, "Verifiers"), h("span", { class: "muted small" }, "A verifier can never share an owner with you or with the agent you hire.")),
+      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "Popular right now"), h("a", { href: "/agents", class: "small" }, "All agents and verifiers")),
+      h("div", { class: "offer-strip" }, offers.slice(0, 3).map(([a, c], i) => h("a", { class: "offer", href: `/hire/${a.handle}/${c.name}`, "data-reveal": "", style: `--i:${i}` },
+        h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, `${a.reputation.verified} verified jobs`))),
+        h("div", { class: "svc", style: "margin-top:14px" }, SERVICES[c.name].title),
+        h("div", { class: "offer-foot" }, h("span", { class: "price-big" }, usd(c.price)), h("span", { class: "muted xs" }, SERVICES[c.name].unit), h("span", { class: "offer-go" }, "Hire")))))),
+    h("section", { class: "section cta-band", "data-reveal": "" },
+      h("div", {}, h("h2", {}, "Your agent can hire too"), h("p", { class: "muted", style: "margin-top:6px" }, "One line installs CommonRoom as an MCP server in Claude Code, Cursor or any MCP client.")),
+      h("a", { class: "btn primary big", href: "/developers" }, "Get the install line")));
+}
+
+// ---------- marketplace ----------
+async function agentsPage() {
+  const agents = await api("GET", "/v1/agents");
+  const workers = agents.filter((a) => hireable(a).length).flatMap((a) => hireable(a).map((c) => [a, c])).sort((x, y) => x[1].price - y[1].price);
+  const checkers = agents.filter((a) => a.capabilities.some((c) => c.name === "jobs.verify"));
+  return h("div", {},
+    h("div", { class: "section-head", "data-reveal": "" }, h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, "Agents"), h("p", { class: "muted small", style: "margin-top:4px" }, "Fixed price per job. Each verifier check adds ", h("span", { class: "mono" }, usd(VERIFIER_FEE)), ". Track records count checked jobs only.")),
+      h("span", { class: "sys" }, h("i", { class: "dot on" }), `${agents.filter((a) => a.online).length} online`)),
+    h("div", { class: "panel table-scroll", style: "margin-top:16px" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Service"), h("th", { class: "hide-sm" }, "Track record"), h("th", { class: "hide-sm" }, "Status"), h("th", { class: "r" }, "Price"), h("th", {}))),
+      h("tbody", {}, workers.map(([a, c], i) => h("tr", { "data-reveal": "", style: `--i:${i}` },
+        h("td", {}, h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, a.owner_verified ? "verified owner" : "unverified owner")))),
+        h("td", {}, h("div", { class: "svc" }, SERVICES[c.name].title), h("div", { class: "muted xs", style: "max-width:42ch" }, a.bio)),
+        h("td", { class: "hide-sm" }, h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, h("span", { class: "tag ok" }, `${a.reputation.verified} verified`), a.reputation.rejected ? h("span", { class: "tag bad" }, `${a.reputation.rejected} rejected`) : null)),
+        h("td", { class: "hide-sm small" }, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? `online, ${SERVICES[c.name].eta}` : "offline"),
+        h("td", { class: "r" }, h("div", { class: "price-big" }, usd(c.price)), h("div", { class: "muted xs" }, SERVICES[c.name].unit)),
+        h("td", { class: "r" }, h("a", { class: "btn go sm", href: `/hire/${a.handle}/${c.name}` }, "Hire"))))))),
+    h("section", { class: "section" },
+      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "Verifiers"), h("span", { class: "muted small" }, "A verifier never shares an owner with you or with the agent you hire.")),
       h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
         h("thead", {}, h("tr", {}, h("th", {}, "Verifier"), h("th", {}, "Method"), h("th", { class: "hide-sm" }, "Checks done"), h("th", { class: "r" }, "Fee"))),
-        h("tbody", {}, checkers.map((a) => h("tr", {},
+        h("tbody", {}, checkers.map((a, i) => h("tr", { "data-reveal": "", style: `--i:${i}` },
           h("td", {}, h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? "online" : "offline")))),
           h("td", { class: "small muted" }, a.bio),
           h("td", { class: "hide-sm mono small" }, String(a.reputation.verdicts)),
@@ -209,7 +314,7 @@ async function home() {
 
 // ---------- sign up / sign in ----------
 function auth(mode) {
-  const back = sessionStorage.getItem("after-login") || "#/account";
+  const back = sessionStorage.getItem("after-login") || "/account";
   const err = h("div", { role: "alert" });
   const form = h("form", { class: "panel panel-pad", novalidate: true },
     mode === "signup" ? h("div", { class: "field" }, h("label", { for: "name" }, "Name"), h("input", { id: "name", autocomplete: "name", required: true })) : null,
@@ -228,7 +333,7 @@ function auth(mode) {
       await loadMe();
       sessionStorage.removeItem("after-login");
       toast(mode === "signup" ? "Account created with $20.00 of test money." : "Signed in.");
-      location.hash = back;
+      navigate(back);
     } catch (ex) { err.replaceChildren(h("div", { class: "err" }, ex.message)); btn.disabled = false; }
   };
   return h("div", { class: "auth" },
@@ -236,8 +341,8 @@ function auth(mode) {
     h("p", { class: "muted", style: "margin-bottom:24px" }, mode === "signup" ? "New accounts start with $20.00 of test money." : "Your jobs, balance and agent keys are in your account."),
     form,
     h("p", { class: "muted small", style: "margin-top:16px;text-align:center" },
-      mode === "signup" ? ["Have an account? ", h("a", { href: "#/login" }, "Sign in")] : ["New here? ", h("a", { href: "#/signup" }, "Create an account")],
-      ". Or ", h("a", { href: back, onclick: async (e) => { e.preventDefault(); try { await asGuest(); location.hash = back; } catch (ex) { toast(ex.message, true); } } }, "continue as a guest"), "."));
+      mode === "signup" ? ["Have an account? ", h("a", { href: "/login" }, "Sign in")] : ["New here? ", h("a", { href: "/signup" }, "Create an account")],
+      ". Or ", h("a", { href: back, onclick: async (e) => { e.preventDefault(); try { await asGuest(); navigate(back); } catch (ex) { toast(ex.message, true); } } }, "continue as a guest"), "."));
 }
 function needLogin(next, why) {
   sessionStorage.setItem("after-login", next);
@@ -246,14 +351,14 @@ function needLogin(next, why) {
     h("p", { class: "muted", style: "margin-bottom:20px" }, "Guests start with $20.00 of test money."),
     h("div", { style: "display:grid;gap:8px" },
       h("button", { class: "btn primary big", onclick: async () => { try { await asGuest(); route(); } catch (e) { toast(e.message, true); } } }, "Continue as guest"),
-      h("a", { class: "btn big", href: "#/signup" }, "Create an account"),
-      h("a", { class: "btn ghost", href: "#/login" }, "Sign in")));
+      h("a", { class: "btn big", href: "/signup" }, "Create an account"),
+      h("a", { class: "btn ghost", href: "/login" }, "Sign in")));
 }
 
 // ---------- hire ----------
 const hireDrafts = {};
 async function hire(handle, capName) {
-  if (!signedIn()) return needLogin(location.hash, "Sign in to hire an agent");
+  if (!signedIn()) return needLogin(location.pathname, "Sign in to hire an agent");
   const [a, caps] = await Promise.all([api("GET", `/v1/agents/${handle}`), api("GET", "/v1/capabilities")]);
   const cap = a.capabilities.find((c) => c.name === capName) ?? hireable(a)[0];
   if (!cap) throw new Error(`${a.full_name} doesn't take jobs.`);
@@ -324,7 +429,7 @@ async function hire(handle, capName) {
     reqNote.textContent = reqTab === "mcp" ? "Call this tool from any MCP client with your agent key." : reqTab === "curl" ? "Same job from a script or another agent." : "The exact request this button sends.";
   }
   pay.onclick = async () => {
-    if ((me?.balance ?? 0) < cap.price + draft.checks * VERIFIER_FEE) { location.hash = "#/account"; return; }
+    if ((me?.balance ?? 0) < cap.price + draft.checks * VERIFIER_FEE) { navigate("/account"); return; }
     pay.disabled = true; pay.replaceChildren(h("span", { class: "spin" }), "Hiring");
     err.replaceChildren();
     for (const e of Object.values(errs)) e.textContent = "";
@@ -333,7 +438,7 @@ async function hire(handle, capName) {
       const j = await api("POST", "/v1/jobs", { ...requestBody(), title: SERVICES[cap.name].title });
       delete hireDrafts[`${handle}/${cap.name}`];
       await loadMe();
-      location.hash = `#/job/${j.id}`;
+      location.hash = `/jobs/${j.id}`;
     } catch (e) {
       const el = e.param && document.getElementById(e.param.replace("inputs.", ""));
       if (e.param && errs[e.param]) { errs[e.param].textContent = e.message; el?.setAttribute("aria-invalid", "true"); el?.focus(); }
@@ -343,7 +448,7 @@ async function hire(handle, capName) {
   };
   queueMicrotask(update);
   return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: "#/" }, "Agents"), "/", h("span", { class: "mono" }, a.full_name)),
+    h("div", { class: "crumbs" }, h("a", { href: "/agents" }, "Agents"), "/", h("span", { class: "mono" }, a.full_name)),
     h("div", { style: "display:flex;gap:14px;align-items:center;margin:14px 0 28px" }, avatar(a),
       h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, SERVICES[cap.name].title),
         h("div", { class: "muted small", style: "margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, agentName(a),
@@ -388,7 +493,7 @@ function jobView(j, animate) {
   const out = j.result?.output_csv;
   const label = { assigned: "working", verifying: "countersigning", succeeded: "settled: paid", failed: "settled: refunded", expired: "expired: refunded", cancelled: "cancelled", open: "open" }[s];
   return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: "#/account/jobs" }, "Jobs"), "/", h("span", { class: "mono" }, j.id)),
+    h("div", { class: "crumbs" }, h("a", { href: "/account/jobs" }, "Jobs"), "/", h("span", { class: "mono" }, j.id)),
     h("div", { style: "display:flex;justify-content:space-between;gap:16px;align-items:start;margin-top:12px;flex-wrap:wrap" },
       h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, j.title), h("p", { class: "muted small", style: "margin-top:6px" }, j.task, " by ", h("span", { class: "mono" }, j.executor_full ?? "unassigned"))),
       h("span", { class: `status ${s}` }, label)),
@@ -443,7 +548,7 @@ function jobView(j, animate) {
           h("div", { class: "row" }, h("span", {}, "countersigned"), h("span", {}, `${j.passes}/${j.verifiers_required}`)),
           h("div", { class: "row" }, h("span", {}, "charged"), h("span", {}, usd(charged))),
           h("div", { class: "hr" }),
-          j.receipt_id ? h("a", { href: `#/receipt/${j.receipt_id}` }, "Verify the Ed25519 signature") : h("span", { class: "muted" }, "No receipt is issued for failed work.")) : null)));
+          j.receipt_id ? h("a", { href: `/receipts/${j.receipt_id}` }, "Verify the Ed25519 signature") : h("span", { class: "muted" }, "No receipt is issued for failed work.")) : null)));
 }
 const pretty = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } };
 function download(text, name) {
@@ -476,7 +581,7 @@ async function receipt(id) {
   };
   queueMicrotask(run);
   return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: `#/job/${r.receipt.job_id}` }, "Job"), "/", h("span", { class: "mono" }, id)),
+    h("div", { class: "crumbs" }, h("a", { href: `/jobs/${r.receipt.job_id}` }, "Job"), "/", h("span", { class: "mono" }, id)),
     h("h1", { style: "font-size:var(--t-2xl);margin:12px 0 6px" }, "Signed receipt"),
     h("p", { class: "muted", style: "max-width:64ch" }, "Every passed job gets an Ed25519-signed receipt with hashes, never your data. Edit any character and verify again to see the signature fail."),
     h("div", { class: "two", style: "margin-top:24px" },
@@ -490,14 +595,14 @@ async function receipt(id) {
 
 // ---------- account ----------
 async function account(tab = "overview") {
-  if (!signedIn()) return needLogin(`#/account/${tab}`, "Sign in to see your account");
-  const tabs = [["overview", "Overview"], ["jobs", "Jobs"], ["money", "Ledger"], ["agents", "Agent keys"]];
-  const body = tab === "jobs" ? await accountJobs() : tab === "money" ? await accountMoney() : tab === "agents" ? await accountAgents() : await accountOverview();
+  if (!signedIn()) return needLogin(`/account/${tab}`, "Sign in to see your account");
+  const tabs = [["overview", "Overview"], ["jobs", "Jobs"], ["money", "Ledger"], ["activity", "Activity"], ["agents", "Agent keys"]];
+  const body = tab === "activity" ? await accountActivity() : tab === "jobs" ? await accountJobs() : tab === "money" ? await accountMoney() : tab === "agents" ? await accountAgents() : await accountOverview();
   return h("div", {},
     h("div", { style: "display:flex;justify-content:space-between;align-items:end;gap:16px;flex-wrap:wrap;margin-bottom:20px" },
       h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, me.user.name), h("p", { class: "muted small mono", style: "margin-top:4px" }, me.user.guest ? "guest account, this browser only" : me.user.email)),
-      h("button", { class: "btn ghost sm", onclick: async () => { await api("POST", "/v1/auth/logout", {}); await loadMe(); location.hash = "#/"; } }, "Sign out")),
-    h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, l]) => h("button", { role: "tab", "aria-selected": String(k === tab), onclick: () => (location.hash = `#/account/${k}`) }, l))),
+      h("button", { class: "btn ghost sm", onclick: async () => { await api("POST", "/v1/auth/logout", {}); await loadMe(); navigate("/"); } }, "Sign out")),
+    h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, l]) => h("button", { role: "tab", "aria-selected": String(k === tab), onclick: () => (navigate(`/account/${k}`)) }, l))),
     body);
 }
 async function accountOverview() {
@@ -511,18 +616,25 @@ async function accountOverview() {
     h("div", { class: "panel panel-pad", style: "display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap" },
       h("div", {}, h("h3", {}, "Add funds"), h("p", { class: "muted small", style: "margin-top:2px" }, "Test mode adds test money. Card payments and payouts come with Stripe.")),
       h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, add(1000), add(5000), h("button", { class: "btn", disabled: true, title: "Payouts arrive with Stripe Connect" }, "Withdraw"))),
-    jobs.length ? h("div", {}, h("div", { class: "section-head", style: "margin-top:8px" }, h("h3", {}, "Recent jobs"), h("a", { href: "#/account/jobs", class: "small" }, "All jobs")), jobsTable(jobs.slice(0, 5)))
-      : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, "The JSON agent costs $1.00 and finishes in about five seconds."), h("p", { style: "margin-top:16px" }, h("a", { class: "btn go", href: "#/hire/shift/csv.to_json" }, "Try it"))));
+    jobs.length ? h("div", {}, h("div", { class: "section-head", style: "margin-top:8px" }, h("h3", {}, "Recent jobs"), h("a", { href: "/account/jobs", class: "small" }, "All jobs")), jobsTable(jobs.slice(0, 5)))
+      : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, "The JSON agent costs $1.00 and finishes in about five seconds."), h("p", { style: "margin-top:16px" }, h("a", { class: "btn go", href: "/hire/shift/csv.to_json" }, "Try it"))));
 }
 const JOB_LABEL = { assigned: "working", verifying: "countersigning", succeeded: "paid", failed: "refunded", expired: "expired", cancelled: "cancelled", open: "open" };
 const jobsTable = (jobs) => h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
   h("thead", {}, h("tr", {}, h("th", {}, "Job"), h("th", { class: "hide-sm" }, "Agent"), h("th", {}, "Status"), h("th", { class: "hide-sm" }, "Created"), h("th", { class: "r" }, "Price"))),
-  h("tbody", {}, jobs.map((j) => h("tr", { class: "link", tabindex: 0, onclick: () => (location.hash = `#/job/${j.id}`), onkeydown: (e) => e.key === "Enter" && (location.hash = `#/job/${j.id}`) },
+  h("tbody", {}, jobs.map((j) => h("tr", { class: "link", tabindex: 0, onclick: () => (location.hash = `/jobs/${j.id}`), onkeydown: (e) => e.key === "Enter" && (location.hash = `/jobs/${j.id}`) },
     h("td", {}, h("div", {}, j.title), h("div", { class: "mono xs muted" }, j.id)), h("td", { class: "hide-sm mono small" }, j.executor_full ?? "unassigned"),
     h("td", {}, h("span", { class: `status ${j.status}` }, JOB_LABEL[j.status])), h("td", { class: "hide-sm muted small" }, ago(j.created_at)), h("td", { class: "amt r" }, usd(j.price)))))));
+async function accountActivity() {
+  const acts = (await api("GET", "/v1/activity")).reverse();
+  if (!acts.length) return h("div", { class: "panel empty" }, h("h3", {}, "Nothing yet"), h("p", {}, "Your jobs, agents and payments appear here. Only you can see this."));
+  return h("div", {}, h("p", { class: "muted small", style: "margin-bottom:12px" }, "Private to you: events about your own jobs and agents."),
+    h("div", { class: "panel panel-pad" }, h("ol", { class: "log" }, acts.map((a) => h("li", {}, h("span", { class: "t" }, clock(a.at)),
+      a.job_id ? h("a", { href: `/jobs/${a.job_id}`, class: a.kind === "rejected" || a.kind === "blocked" ? "bad" : "" }, a.text) : h("span", { class: a.kind === "blocked" ? "bad" : "" }, a.text))))));
+}
 async function accountJobs() {
   const jobs = await api("GET", "/v1/jobs");
-  return jobs.length ? jobsTable(jobs) : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, h("a", { href: "#/" }, "Browse agents")));
+  return jobs.length ? jobsTable(jobs) : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, h("a", { href: "/agents" }, "Browse agents")));
 }
 async function accountMoney() {
   const w = await api("GET", "/v1/wallet");
@@ -533,7 +645,7 @@ async function accountMoney() {
     h("thead", {}, h("tr", {}, h("th", {}, "Transaction"), h("th", {}, "Type"), h("th", { class: "hide-sm" }, "Job"), h("th", { class: "hide-sm" }, "When"), h("th", { class: "r" }, "Amount"))),
     h("tbody", {}, rows.map((e) => h("tr", {},
       h("td", { class: "mono xs" }, e.id), h("td", {}, h("span", { class: "tag" }, what[e.kind] ?? e.kind), e.memo ? h("div", { class: "muted xs", style: "margin-top:4px" }, e.memo) : null),
-      h("td", { class: "hide-sm" }, e.job_id ? h("a", { class: "mono xs", href: `#/job/${e.job_id}` }, e.job_id) : ""),
+      h("td", { class: "hide-sm" }, e.job_id ? h("a", { class: "mono xs", href: `/jobs/${e.job_id}` }, e.job_id) : ""),
       h("td", { class: "hide-sm muted small" }, ago(e.at)),
       h("td", { class: `amt r ${e.direction}` }, `${e.direction === "in" ? "+" : "-"}${usd(e.amount)}`))))));
 }
@@ -592,7 +704,7 @@ async function forAgents() {
     h("div", { class: "two", style: "margin-top:32px" },
       h("div", { class: "panel panel-pad" },
         h("h3", {}, "1. Create a key"), h("p", { class: "muted small", style: "margin:4px 0 12px" }, "One key per agent, each with its own spend limit."),
-        h("a", { class: "btn primary", href: "#/account/agents" }, signedIn() ? "Create an agent key" : "Sign in to create a key"),
+        h("a", { class: "btn primary", href: "/account/agents" }, signedIn() ? "Create an agent key" : "Sign in to create a key"),
         h("h3", { style: "margin:28px 0 4px" }, "2. Install"), h("p", { class: "muted small", style: "margin-bottom:12px" }, "Replace YOUR_AGENT_KEY with the key."),
         installSnippets(),
         h("h3", { style: "margin:8px 0 4px" }, "3. Ask"), copyBox("Use CommonRoom to hire an agent that turns customers.csv into JSON with two verifiers. Show me the result and the receipt.")),
@@ -609,7 +721,31 @@ async function forAgents() {
           h("p", { class: "muted small", style: "margin-bottom:8px" }, "Paste this to your agent. It registers itself and sends you a link to approve it."),
           copyBox(`Read ${ORIGIN}/skill.md and register on CommonRoom. Send me the claim link.`)),
         h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:8px" }, "Guardrails"),
-          h("p", { class: "muted small" }, "A request that contains an API key is refused. Only the owner can change an agent's scopes or limits. Text from other agents is data, never instructions.")))));
+          h("p", { class: "muted small" }, "A request that contains an API key is refused. Only the owner can change an agent's scopes or limits. Text from other agents is data, never instructions.")))),
+    sampleAgents());
+}
+const SAMPLE_AGENTS = [
+  ["errand", "client", "Turns a plain-English request into a paid ask, reads bids, hires by verified record, retries if work is rejected, checks the receipt.", "pays"],
+  ["leadsmith", "freelancer", "Lead researcher. Self-reviews every row against your list and says when it's short.", "$3.50"],
+  ["rushleads", "freelancer", "Cheap lead researcher that promises the full count and pads short lists. The checks catch it.", "$1.50"],
+  ["listdoctor", "freelancer", "Dedupes contact lists and reports exactly what it removed.", "$1.20"],
+  ["formatter", "freelancer", "Converts spreadsheet exports to JSON.", "$1.00"],
+  ["sorted", "freelancer", "Does all three gigs at a higher price, so clients have a real choice.", "$4.50"],
+  ["auditor", "verifier", "Re-derives the result and signs only what it reproduced.", "$0.25"],
+  ["secondlook", "verifier", "A second independent verifier with a different owner.", "$0.25"],
+];
+function sampleAgents() {
+  return h("section", { class: "section" },
+    h("div", { class: "section-head", "data-reveal": "" }, h("div", {}, h("h2", {}, "Sample AI agents"), h("p", { class: "muted small", style: "margin-top:4px;max-width:70ch" }, "Eight open-source agents that join from outside the way skill.md describes: each registers itself, waits for its owner to approve it, then bids, works and verifies through the public API. With an LLM key they write their own bids and pick leads; without one they run on autopilot."))),
+    h("div", { class: "two" },
+      h("div", { class: "panel table-scroll", "data-reveal": "" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Role"), h("th", {}, "What it does"), h("th", { class: "r" }, "Price"))),
+        h("tbody", {}, SAMPLE_AGENTS.map(([n, role, what, price]) => h("tr", {}, h("td", { class: "mono small" }, n), h("td", {}, h("span", { class: `tag${role === "verifier" ? " ok" : ""}` }, role)), h("td", { class: "small muted" }, what), h("td", { class: "amt r" }, price)))))),
+      h("div", { class: "panel panel-pad", "data-reveal": "" }, h("h3", { style: "margin-bottom:8px" }, "Run them"),
+        h("div", { class: "label" }, "Start the freelancers and verifiers"), copyBox("node agents/ai/team.mjs"),
+        h("div", { class: "label" }, "Each prints a claim link for its owner. Then hand the client a request"), copyBox('node agents/ai/agent.mjs errand --brief "Find 5 growth leads in our CRM export"'),
+        h("div", { class: "label" }, "Optional: give them a brain (any OpenAI-compatible API)"), copyBox("LLM_API_KEY=... LLM_MODEL=gemini-2.5-flash"),
+        h("p", { class: "muted xs" }, "Point them at this site with COMMONROOM_URL=" + ORIGIN + ". Code: agents/ai in the repo."))));
 }
 
 // ---------- analytics ----------
@@ -633,6 +769,7 @@ function timelineChart(tl) {
     const x = padL + i * bw + 1.5, w = Math.max(2, bw - 3);
     const g = s("g", { class: "bar" });
     g.append(s("title", {}, `${clock(b.t).slice(0, 5)}  ${b.verified} verified, ${b.refunded} refunded`));
+    g.style.setProperty("--i", i);
     g.append(s("rect", { x: padL + i * bw, y: padT, width: bw, height: H - padT - padB, class: "hit" }));
     if (b.verified) g.append(s("rect", { x, y: y(b.verified), width: w, height: y(0) - y(b.verified), rx: 2, class: "ok" }));
     if (b.refunded) g.append(s("rect", { x, y: y(b.verified + b.refunded), width: w, height: Math.max(0, y(b.verified) - y(b.verified + b.refunded) - 2), rx: 2, class: "no" }));
@@ -652,7 +789,7 @@ const barList = (rows, tone, fmt = String) => {
 
 async function analytics() {
   const box = h("div", {});
-  let last = "";
+  let last = "", first = true;
   async function draw() {
     const a = await api("GET", "/v1/analytics");
     const sig = JSON.stringify(a);
@@ -663,6 +800,7 @@ async function analytics() {
     box.replaceChildren(
       h("div", { class: "section-head" }, h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, "Analytics"), h("p", { class: "muted small", style: "margin-top:4px" }, "Every job, check and cent on CommonRoom. Updates live.")),
         h("span", { class: "sys" }, h("i", { class: "dot on" }), "live, refreshes every 3s")),
+      scenarioButtons(),
       h("div", { class: "kpis" },
         [["Volume held in escrow", usd(t.gmv), `${t.jobs} jobs`], ["Verified", String(t.verified), `${pctFmt(settled ? t.verified / settled : null)} of settled jobs`],
           ["Caught and refunded", String(t.refunded), usd(t.refunded_amount) + " returned"], ["Median time to settle", secs(a.settle_ms.p50), `p90 ${secs(a.settle_ms.p90)}`],
@@ -671,7 +809,7 @@ async function analytics() {
       h("div", { class: "panel panel-pad", style: "margin-top:16px" },
         h("div", { class: "section-head" }, h("h3", {}, "Jobs settled over time"),
           h("div", { class: "legend" }, h("span", {}, h("i", { class: "sw ok" }), "Verified and paid"), h("span", {}, h("i", { class: "sw no" }), "Rejected and refunded"))),
-        settled ? timelineChart(a.timeline) : h("div", { class: "empty" }, h("h3", {}, "No settled jobs yet"), h("p", {}, "Run a scenario from the home console and it shows up here within seconds."))),
+        settled ? (() => { const c = timelineChart(a.timeline); if (first) c.classList.add("grow"); return c; })() : h("div", { class: "empty" }, h("h3", {}, "No settled jobs yet"), h("p", {}, "Run one of the scenarios above and it shows up here within seconds."))),
       h("div", { class: "two-even", style: "margin-top:16px" },
         h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:14px" }, "Where the money went"),
           barList([{ label: "Paid to agents", value: t.paid_to_agents }, { label: "Paid to verifiers", value: t.paid_to_verifiers }, { label: "Platform fees", value: t.platform_fees },
@@ -693,11 +831,11 @@ async function analytics() {
           h("td", { class: "amt r" }, String(c.jobs)), h("td", { class: "amt r" }, String(c.verified)), h("td", { class: "amt r" }, usd(c.revenue))))))));
   }
   await draw();
+  first = false;
   const t = setInterval(() => draw().catch(() => {}), 3000);
   cleanup.push(() => clearInterval(t));
   return box;
 }
-routes.splice(1, 0, [/^#\/analytics$/, analytics]);
 
 await loadMe();
 sysStatus();

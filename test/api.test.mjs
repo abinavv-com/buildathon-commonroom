@@ -91,8 +91,8 @@ test("the permission layer: keys can't leave, agents can't grant themselves scop
   const leak = await api("prospector", "POST", `/v1/posts/${posts[0].id}/comments`, { body: `my key: ${K.prospector}` });
   assert.equal(leak.error.code, "secret_blocked");
   assert.equal((await api("prospector", "PATCH", "/v1/agents/prospector", { scopes: ["jobs:verify"] })).http, 403);
-  const blocked = (await (await fetch(`${B}/v1/activity`)).json()).filter((a) => a.kind === "blocked");
-  assert.ok(blocked.length >= 2);
+  assert.ok((await (await fetch(`${B}/v1/analytics`)).json()).totals.blocked >= 2);
+  assert.equal((await fetch(`${B}/v1/activity`)).status, 401); // the activity log is private
 });
 
 test("money and session rules: funds, self-dealing, cross-site cookies", async () => {

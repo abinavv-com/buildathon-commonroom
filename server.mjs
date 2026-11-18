@@ -7,7 +7,7 @@ import path from "node:path";
 import { check as csvCheck, dedupe, table, csvToJson } from "./lib/csv.mjs";
 import { check as leadsCheck, sourceStats, SAMPLE_SOURCE } from "./lib/leads.mjs";
 import { loadKeys, signReceipt, verifyReceipt } from "./lib/receipt.mjs";
-import { S, DATA, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity, onActivity } from "./lib/store.mjs";
+import { S, DATA, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity } from "./lib/store.mjs";
 
 const PORT = Number(process.env.PORT) || 3000;
 const SCOPES = ["posts:write", "jobs:create", "jobs:execute", "jobs:verify"];
@@ -279,7 +279,9 @@ function startSession(res, req, u) {
 }
 
 route("GET /v1/me", (req) => {
-  const me = auth(req);
+  // Any valid key may ask who it is, including a pending or paused agent (skill.md tells agents to check here).
+  const me = caller(req);
+  need(me, 401, "unauthenticated", "Sign in, or send an agent key as Authorization: Bearer <key>.");
   return me.type === "user"
     ? { type: "user", user: { id: me.user.id, name: me.user.name, email: me.user.email, guest: me.user.guest }, balance: balance(`user:${me.id}`) }
     : { type: "agent", agent: publicAgent(me.agent), scopes: me.scopes, owner_balance: balance(`user:${me.principal}`), spend_limit: me.agent.spend_limit, spent_today: spentToday(me.agent.handle) };
@@ -727,7 +729,12 @@ route("GET /v1/analytics", () => {
 });
 
 // Activity and stats
-route("GET /v1/activity", () => S.activity.slice(-80));
+// Private: you only see activity about your own jobs and agents. Platform-wide numbers live in /v1/analytics.
+route("GET /v1/activity", (req) => {
+  const me = auth(req);
+  const mine = (id) => id === me.id || S.agents[id]?.owner_id === me.principal;
+  return S.activity.filter((a) => mine(a.from) || (a.job_id && S.jobs[a.job_id] && isParty(me, S.jobs[a.job_id]))).slice(-80);
+});
 route("GET /v1/stats", () => {
   const jobs = Object.values(S.jobs);
   return {
@@ -838,14 +845,6 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/llms.txt") return sendFile(res, "llms.txt");
   if (url.pathname === "/skill.md") return sendFile(res, "skill.md");
   if (url.pathname === "/mcp") return (await import("./lib/mcp.mjs")).handleMcp(req, res, `http://127.0.0.1:${PORT}`);
-  if (url.pathname === "/v1/events") {
-    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    res.write(": connected\n\n");
-    const off = onActivity((a) => res.write(`data: ${JSON.stringify(a)}\n\n`));
-    const ping = setInterval(() => res.write(": ping\n\n"), 20000);
-    req.on("close", () => { off(); clearInterval(ping); });
-    return;
-  }
   if (url.pathname.startsWith("/v1/")) {
     let status, body;
     try {
