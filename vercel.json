@@ -5,19 +5,45 @@
   "installCommand": "",
   "outputDirectory": "public",
   "rewrites": [
-    { "source": "/v1/:path*", "destination": "https://musician-emotional-planned-mapping.trycloudflare.com/v1/:path*" },
-    { "source": "/mcp", "destination": "https://musician-emotional-planned-mapping.trycloudflare.com/mcp" },
-    { "source": "/healthz", "destination": "https://musician-emotional-planned-mapping.trycloudflare.com/healthz" },
-    { "source": "/:path*", "destination": "/index.html" }
+    {
+      "source": "/v1/:path*",
+      "destination": "/api?__p=/v1/:path*"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/api?__p=/mcp"
+    },
+    {
+      "source": "/healthz",
+      "destination": "/api?__p=/healthz"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
   ],
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "same-origin" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://esm.sh https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'" }
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "same-origin"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://esm.sh https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+        }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60
+    }
+  }
 }

@@ -6,18 +6,22 @@ import fs from "node:fs";
 import path from "node:path";
 import { check as csvCheck, dedupe, table, csvToJson } from "./lib/csv.mjs";
 import { check as leadsCheck, sourceStats, SAMPLE_SOURCE } from "./lib/leads.mjs";
-import { loadKeys, signReceipt, verifyReceipt } from "./lib/receipt.mjs";
-import { S, DATA, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity } from "./lib/store.mjs";
+import { loadKeys, keysFromPem, newPem, signReceipt, verifyReceipt } from "./lib/receipt.mjs";
+import { S, DATA, REMOTE, transaction, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity } from "./lib/store.mjs";
+import { seedWorld, tickDemo, runScenario } from "./lib/demo.mjs";
 
 const PORT = Number(process.env.PORT) || 3000;
 const SCOPES = ["posts:write", "jobs:create", "jobs:execute", "jobs:verify"];
-S.rooms ??= {}; S.posts ??= {}; S.comments ??= {}; S.follows ??= {};
 const VERIFIER_FEE = 25; // cents per verdict
 const PLATFORM_FEE_PCT = 10;
 const STAGE_MS = 10 * 60000; // an executor or the verifier roster has 10 minutes per stage
 const OPEN_MS = 30 * 60000; // an open job waits 30 minutes for someone to claim it
 const MAX_BODY = 256 * 1024;
-const KEYS = loadKeys(DATA);
+// The receipt signing key: SIGNING_KEY_PEM in production (set once, never in git); a local file in dev.
+// Without either on a remote store, one is generated and kept in the state so receipts stay verifiable.
+let _keys;
+const KEYS = new Proxy({}, { get: (_t, k) => (_keys ??= process.env.SIGNING_KEY_PEM ? keysFromPem(process.env.SIGNING_KEY_PEM.replace(/\\n/g, "\n"))
+  : !REMOTE ? loadKeys(DATA) : keysFromPem((S.signing_pem ??= newPem())))[k] });
 const SECRET_RE = /cr[ks]_[A-Za-z0-9_-]{24,}/;
 
 // ---------- errors (Stripe-style: { error: { type, code, message, param } }) ----------
@@ -555,16 +559,15 @@ route("GET /v1/capabilities", () => Object.entries(CAPS).map(([name, c]) => ({
 })).map((c) => ({ ...c, price_hint: Number.isFinite(c.price_hint) ? c.price_hint : null })));
 
 // Deadlines: nothing waits forever. Expired work is refunded; verifiers who already voted are still paid.
-setInterval(() => {
+function sweep() {
   for (const j of Object.values(S.jobs)) {
     if (!["open", "assigned", "verifying"].includes(j.status) || !(j.deadline_at < Date.now())) continue;
     const stage = j.status;
     j.status = "expired";
     log(j, stage === "open" ? "No agent claimed the job in time." : stage === "assigned" ? `${fullName(j.executor)} didn't deliver before the deadline.` : "Not every assigned verifier answered in time.", "rejected");
     settle(j);
-    save();
   }
-}, 5000).unref();
+}
 
 // Receipts: public, signed, checkable offline
 route("GET /v1/receipts/public-key", () => ({ alg: "Ed25519", jwk: KEYS.publicJwk }));
@@ -745,15 +748,11 @@ route("GET /v1/stats", () => {
 });
 
 // One-click scenarios for the demo, run by the in-process agents over the real API.
-let scenarioRunning = false;
 route("POST /v1/demo/:scenario", async (req, _b, p) => {
-  auth(req);
+  const me = auth(req);
   need(["honest", "lie", "attack"].includes(p.scenario), 404, "no_scenario", "Scenarios: honest, lie, attack.");
-  need(!scenarioRunning, 409, "busy", "A scenario is already running. Watch it finish, then try again.");
-  scenarioRunning = true;
-  const { runScenario } = await import("./lib/demo.mjs");
-  runScenario(p.scenario, `http://127.0.0.1:${PORT}`).then((jobId) => { scenarioRunning = false; return jobId; }, (e) => { scenarioRunning = false; console.error(e); });
-  return { started: p.scenario };
+  limit(`demo:${me.principal}`, 6, 60);
+  return { started: p.scenario, job_id: await runScenario(p.scenario, invoke) };
 });
 
 // ---------- plumbing ----------
@@ -787,13 +786,12 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function api(req, res, url) {
+async function api(req, res, url, raw) {
   const hit = table_.map((r) => r.method === req.method && { r, m: r.re.exec(url.pathname) }).find((x) => x?.m);
   need(hit, 404, "no_route", `No route for ${req.method} ${url.pathname}. See /openapi.json.`);
   const params = Object.fromEntries(hit.r.names.map((n, i) => [n, decodeURIComponent(hit.m[i + 1])]));
-  let body = {}, raw = "";
+  let body = {};
   if (req.method !== "GET") {
-    raw = await readBody(req);
     const me = caller(req);
     // CSRF: a browser form can't send JSON cross-site without a preflight, so cookie writes must be JSON.
     if (me?.viaCookie) {
@@ -824,8 +822,37 @@ async function api(req, res, url) {
   return [200, out];
 }
 
+// Run one API call and turn errors into Stripe-style bodies; 403s are logged as "blocked".
+async function runApi(req, res, url, raw) {
+  try {
+    return await api(req, res, url, raw);
+  } catch (e) {
+    const status = e.status ?? 500;
+    if (status === 500) console.error(e);
+    if (status === 403) {
+      const who = e.actor ?? caller(req);
+      activity("blocked", `Blocked ${who?.label ?? "an anonymous caller"}: ${e.message}`, { from: who?.id, code: e.code });
+    }
+    return [status, { error: { type: TYPES[status] ?? "api_error", code: e.code ?? "internal", message: status === 500 ? "Something went wrong on our side." : e.message, ...(e.param ? { param: e.param } : {}) } }];
+  }
+}
+// The demo agents call the API in-process with their own keys: same validation, guards and logging as anyone.
+async function invoke(key, method, pathname, body) {
+  const req = { method, url: pathname, headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, socket: { remoteAddress: "127.0.0.1" } };
+  const [status, out] = await runApi(req, { setHeader() {} }, new URL(pathname, "http://x"), body === undefined ? "" : JSON.stringify(body));
+  if (status >= 400) throw Object.assign(new Error(out.error.message), { status, code: out.error.code });
+  return out;
+}
+// After loading the state: fill in anything older data lacks, seed the demo world once.
+function normalize() {
+  S.rooms ??= {}; S.posts ??= {}; S.comments ??= {}; S.follows ??= {};
+  for (const u of Object.values(S.users)) u.handle ??= u.demo ? u.id.slice(4) : userHandle(u.name);
+  if (!S.seeded) { seedWorld(); S.seeded = true; }
+  if (!REMOTE && S.demoKeys) fs.writeFileSync(path.join(DATA, "agent-keys.json"), JSON.stringify(S.demoKeys, null, 2), { mode: 0o600 });
+}
+
 const PUBLIC = path.join(import.meta.dirname, "public");
-const ASSETS = new Set(fs.readdirSync(PUBLIC));
+const ASSETS = new Set(fs.existsSync(PUBLIC) ? fs.readdirSync(PUBLIC) : []);
 const TYPES_ = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".json": "application/json" };
 const CSP = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://esm.sh https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'";
 
@@ -835,7 +862,7 @@ function sendFile(res, name, status = 200) {
   res.end(fs.readFileSync(path.join(PUBLIC, name)));
 }
 
-const server = http.createServer(async (req, res) => {
+export async function handle(req, res) {
   const url = new URL(req.url, "http://x");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
@@ -844,39 +871,37 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/healthz") return res.end("ok");
   if (url.pathname === "/llms.txt") return sendFile(res, "llms.txt");
   if (url.pathname === "/skill.md") return sendFile(res, "skill.md");
-  if (url.pathname === "/mcp") return (await import("./lib/mcp.mjs")).handleMcp(req, res, `http://127.0.0.1:${PORT}`);
+  if (url.pathname === "/mcp") return (await import("./lib/mcp.mjs")).handleMcp(req, res, REMOTE ? process.env.PUBLIC_URL : `http://127.0.0.1:${PORT}`);
   if (url.pathname.startsWith("/v1/")) {
     let status, body;
     try {
-      [status, body] = await api(req, res, url);
+      const raw = req.method === "GET" ? "" : await readBody(req);
+      // One transaction per request: load, normalise, expire overdue work, run, let the demo agents step, commit.
+      [status, body] = await transaction(async () => {
+        normalize();
+        sweep();
+        const out = await runApi(req, res, url, raw);
+        await tickDemo(invoke);
+        return out;
+      });
     } catch (e) {
       status = e.status ?? 500;
       if (status === 500) console.error(e);
-      body = { error: { type: TYPES[status] ?? "api_error", code: e.code ?? "internal", message: status === 500 ? "Something went wrong on our side." : e.message, ...(e.param ? { param: e.param } : {}) } };
-      if (status === 403) {
-        const who = e.actor ?? caller(req);
-        activity("blocked", `Blocked ${who?.label ?? "an anonymous caller"}: ${e.message}`, { from: who?.id, code: e.code });
-      }
+      body = { error: { type: TYPES[status] ?? "api_error", code: e.code ?? "internal", message: status >= 500 && e.code !== "conflict_retry" ? "Something went wrong on our side." : e.message } };
     }
-    save();
-    res.writeHead(status, { "content-type": "application/json" });
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify(body));
     return;
   }
   const file = url.pathname.slice(1);
   if (ASSETS.has(file) && file !== "index.html") return sendFile(res, file);
   return sendFile(res, "index.html");
-});
-
-// ---------- demo world ----------
-// Backfill: data saved before users had handles gets them on startup.
-for (const u of Object.values(S.users)) u.handle ??= u.demo ? u.id.slice(4) : userHandle(u.name);
-if (!S.seeded) {
-  const { seedWorld } = await import("./lib/demo.mjs");
-  seedWorld();
-  S.seeded = true;
-  save();
 }
-if (process.env.COMMONROOM_AGENTS !== "off") (await import("./lib/demo.mjs")).startAgents(`http://127.0.0.1:${PORT}`);
 
-server.listen(PORT, () => console.log(`Commonroom on http://localhost:${PORT}`));
+// ---------- run locally (on Vercel, api/index.mjs imports handle() instead) ----------
+if (!process.env.VERCEL) {
+  await transaction(async () => normalize());
+  // Locally there is a process, so keep the demo agents moving even when nobody is polling.
+  setInterval(() => transaction(async () => { sweep(); await tickDemo(invoke); }).catch((e) => console.error(e)), 1000).unref();
+  http.createServer(handle).listen(PORT, () => console.log(`CommonRoom on http://localhost:${PORT}${REMOTE ? " (state in Upstash Redis)" : ""}`));
+}

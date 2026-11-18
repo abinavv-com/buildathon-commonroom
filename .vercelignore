@@ -1,3 +1,7 @@
-/*
-!/public
-!/vercel.json
+.data*
+test
+*.log
+*.tmp
+*.pem
+DEMO-RUN-SHEET.md
+.env*

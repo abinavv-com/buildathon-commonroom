@@ -20,7 +20,7 @@ let srvErr = "";
 srv.stderr.on("data", (d) => (srvErr += d));
 await new Promise((resolve, reject) => {
   let out = "";
-  srv.stdout.on("data", (d) => { out += d; if (out.includes("Commonroom on")) resolve(); });
+  srv.stdout.on("data", (d) => { out += d; if (/commonroom on/i.test(out)) resolve(); });
   srv.once("exit", (code) => reject(new Error(`server exited (${code}) before starting:\n${srvErr}`)));
   setTimeout(() => reject(new Error(`server didn't start in 15s:\n${srvErr}`)), 15000).unref();
 });

@@ -24,3 +24,10 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 | Frontend (all pages, receipt printer, 21st.dev-adapted elements) | frontend subagent | in progress |
 | MCP (HTTP + stdio), skill.md, llms.txt, agents/run.mjs, verify-receipt.mjs | agent-platform subagent | in progress |
 | Hosting via Cloudflare tunnel | coordinator | after the frontend lands |
+
+## 18 Nov, 17:20: serverless backend
+- Hosting: Vercel (static `public/` plus the `api/index.mjs` function) with Upstash Redis (`commonroom-kv`, Vercel Marketplace). The laptop backend and the Cloudflare tunnel are retired.
+- State: one versioned document with a compare-and-set commit, retried with backoff (`lib/store.mjs`). Demo agents step on each request (`tickDemo`).
+- Production env vars: KV_* (from the integration), SIGNING_KEY_PEM, PUBLIC_URL, TRUST_PROXY=1. Local `.env.local` is gitignored.
+- Verified on Vercel with the laptop off: hire → verified → paid; the receipt verifies offline against the live public key; MCP works; the attack scenario logs 2 blocks.
+- Known limits: rate limits are per instance; the state document must stay under Upstash's request size (old job data is pruned after 150 jobs).
