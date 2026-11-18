@@ -4,6 +4,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "tidy": "node agents/run.mjs tidy",
+    "crosscheck": "node agents/run.mjs crosscheck",
+    "recount": "node agents/run.mjs recount",
+    "scout": "node agents/run.mjs scout"
   }
 }

@@ -152,7 +152,7 @@ const routes = {
     const failed = j.checks.filter((c) => !c.passed);
     j.status = failed.length ? "failed" : j.verifiers_required ? "verifying" : "succeeded";
     log(j, failed.length
-      ? `Gate 1 failed: ${failed.map((c) => c.label.toLowerCase()).join("; ")}.`
+      ? `Gate 1 failed ${failed.length} of ${j.checks.length} server checks (${failed.map((c) => c.label.toLowerCase()).join("; ")}).`
       : `Gate 1 passed: all ${j.checks.length} server checks.${j.verifiers_required ? ` Waiting for ${j.verifiers_required} verifiers.` : ""}`);
     save();
     return publicJob(j);
