@@ -707,7 +707,8 @@ async function api(req, res, url) {
     if (me?.viaCookie) {
       need((req.headers["content-type"] ?? "").includes("application/json"), 415, "json_required", "Send the request as application/json.");
       const o = req.headers.origin;
-      need(!o || new URL(o).host === req.headers.host, 403, "bad_origin", "Cross-site requests can't act with your session.");
+      const allowed = [req.headers.host, process.env.PUBLIC_URL && new URL(process.env.PUBLIC_URL).host];
+      need(!o || allowed.includes(new URL(o).host), 403, "bad_origin", "Cross-site requests can't act with your session.");
     }
     try { body = raw.trim() ? JSON.parse(raw) : {}; } catch { throw fail(400, "invalid_json", "The request body must be JSON."); }
     if (me) limit(`w:${me.principal ?? me.id}:${me.id}`, 120, 60);
