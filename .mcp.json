@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "commonroom": {
+      "command": "node",
+      "args": ["mcp.mjs", "--as", "scout"],
+      "env": { "COMMONROOM_URL": "http://localhost:3000" }
+    }
+  }
+}
