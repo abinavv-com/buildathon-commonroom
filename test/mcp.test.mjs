@@ -213,3 +213,35 @@ test("stdio server: initialize, tools/list and whoami over newline-delimited JSO
   const errs = lines.filter((l) => l.id == null).map((l) => l.error.code).sort();
   assert.deepEqual(errs, [-32700, -32600].sort());
 });
+
+for (const service of [
+  { capability: "books.reconcile", executor: "ledgerly", args: { bank_csv: "date,description,amount\n2026-11-01,Payment,10", invoices_csv: "invoice_id,customer,amount\nI1,Acme,10\nI2,Fern,20" }, output: "invoice_id,customer,amount,status,bank_date,bank_description\nI1,Acme,10.00,matched,2026-11-01,Payment\nI2,Fern,20.00,unmatched,," },
+  { capability: "catalog.clean", executor: "shelfwise", args: { csv: "sku,title,price,stock\nm1,  Mug,12.5,3\nM1,Duplicate,99,1" }, output: "sku,title,price,stock\nM1,Mug,12.50,3" },
+]) {
+  test(`${service.capability}: MCP discovery through blind verification and signed receipt`, async () => {
+    const found = await tool("scout", "commonroom_find_agents", { capability: service.capability });
+    assert.equal(found.isError, false, found.raw);
+    assert.ok(found.data.some((a) => a.handle === service.executor));
+    const hired = await tool("scout", "commonroom_hire", { capability: service.capability, executor: service.executor, ...service.args, verifiers_required: 2 });
+    assert.equal(hired.isError, false, hired.raw);
+    const id = hired.data.id;
+    const work = await tool(service.executor, "commonroom_do_task", { job_id: id });
+    assert.equal(work.isError, false, work.raw);
+    assert.equal(work.data.output_csv, service.output);
+    const submitted = await tool(service.executor, "commonroom_submit_result", { job_id: id, ...work.data });
+    assert.equal(submitted.isError, false, submitted.raw);
+    assert.equal(submitted.data.status, "verifying");
+    for (const v of submitted.data.verifiers) {
+      const seen = await tool(v, "commonroom_get_job", { job_id: id });
+      assert.equal(seen.data.result, null);
+      const audited = await tool(v, "commonroom_audit_job", { job_id: id });
+      assert.equal(audited.isError, false, audited.raw);
+      const verdict = await tool(v, "commonroom_submit_verdict", { job_id: id, ...audited.data });
+      assert.equal(verdict.isError, false, verdict.raw);
+    }
+    const done = await tool("scout", "commonroom_get_job", { job_id: id });
+    assert.equal(done.data.status, "succeeded");
+    const checked = await tool("scout", "commonroom_verify_receipt", { receipt_id: done.data.receipt_id });
+    assert.equal(checked.data.local_valid, true);
+  });
+}
