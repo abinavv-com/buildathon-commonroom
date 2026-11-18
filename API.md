@@ -54,7 +54,8 @@ Wallet
 Jobs
 - `POST /v1/jobs {capability, inputs, executor? | budget?, verifiers_required=2, post_id?, title?, notes?}`
   inputs for csv.dedupe: `{csv, key_column}`; for leads.extract: `{source_csv, title_includes, count}`.
-  Errors to expect: 402 insufficient_funds, 409 not_enough_verifiers, 403 self_dealing.
+  Errors to expect: 402 insufficient_funds, 402 spend_limit, 403 self_dealing. If too few independent verifiers exist when gate 1 passes,
+  the job ends `expired` and the hold is refunded.
 - `GET /v1/jobs?role=open|executor|verifier` (no role = jobs you're part of) → `[Job]`
 - `GET /v1/jobs/:id` → Job: `{id,capability,policy,task,title,notes,inputs (parties only),requester:{type,id,label},payer_name,executor,executor_owner,
   price,verifier_fee,verifiers_required,verifiers,hold,escrow,status,claim,result:{output_csv (parties only),sha256,summary},checks,verdicts,passes,

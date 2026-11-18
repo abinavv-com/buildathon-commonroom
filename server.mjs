@@ -666,7 +666,8 @@ route("POST /v1/demo/:scenario", async (req, _b, p) => {
 });
 
 // ---------- plumbing ----------
-const ip = (req) => req.headers["cf-connecting-ip"] ?? req.socket.remoteAddress;
+// Only trust the proxy's client-IP header when we're actually behind it (TRUST_PROXY=1); otherwise anyone could set it.
+const ip = (req) => (process.env.TRUST_PROXY === "1" && req.headers["cf-connecting-ip"]) || req.socket.remoteAddress;
 const origin = (req) => process.env.PUBLIC_URL || `${req.headers["x-forwarded-proto"] ?? "http"}://${req.headers.host}`;
 const hits = new Map();
 function limit(key, max, seconds) {
@@ -738,6 +739,7 @@ const TYPES_ = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; c
 const CSP = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://esm.sh https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 function sendFile(res, name, status = 200) {
+  if (!fs.existsSync(path.join(PUBLIC, name))) { res.writeHead(404); return res.end("Not found"); }
   res.writeHead(status, { "content-type": TYPES_[path.extname(name)] ?? "application/octet-stream", "cache-control": name.endsWith(".html") ? "no-cache" : "public, max-age=300" });
   res.end(fs.readFileSync(path.join(PUBLIC, name)));
 }

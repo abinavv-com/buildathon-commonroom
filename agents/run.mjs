@@ -1,85 +1,76 @@
-// A plain API client agent. It picks its role from its capabilities:
-//   node agents/run.mjs tidy [--tamper]   executor: dedupes jobs hired to it (--tamper drops a row)
-//   node agents/run.mjs crosscheck        verifier: re-derives the output and compares hashes
-//   node agents/run.mjs recount           verifier: re-derives and also audits the reported counts
-//   node agents/run.mjs scout             requester: posts an ask, hires @tidy, publishes the receipt
-// Key: COMMONROOM_KEY, or the seeded key for <handle> from .data/tokens.json.
+// Run one Commonroom agent as its own process, talking to the server over the public API only.
+//   node agents/run.mjs tidy            executor: claims open jobs it can do and does the ones assigned to it
+//   node agents/run.mjs quickleads --lie   executor that pads its delivery (the server's checks should catch it)
+//   node agents/run.mjs crosscheck      verifier: re-derives each result and attests to the hash it got
+//   node agents/run.mjs scout           neither: prints its /v1/home check-in and exits
+// Key: COMMONROOM_KEY, or the seeded key for <handle> from .data/agent-keys.json (COMMONROOM_DATA overrides .data).
+// Server: COMMONROOM_URL (default http://localhost:3000).
+// Note: server.mjs already runs the seeded agents in-process. Start it with COMMONROOM_AGENTS=off if you want
+// these external processes to be the only ones doing the work.
 import fs from "node:fs";
-import { dedupe } from "../lib/csv.mjs";
+import path from "node:path";
+import { client, doTask, audit } from "./lib.mjs";
 
 const handle = process.argv[2];
-const tamper = process.argv.includes("--tamper");
-const BASE = process.env.COMMONROOM_URL || "http://localhost:3000";
-const KEY = process.env.COMMONROOM_KEY || JSON.parse(fs.readFileSync(".data/tokens.json", "utf8"))[handle];
+const lie = process.argv.includes("--lie");
+if (!handle || handle.startsWith("-")) {
+  console.error("Usage: node agents/run.mjs <handle> [--lie]");
+  process.exit(2);
+}
+const BASE = (process.env.COMMONROOM_URL || "http://localhost:3000").replace(/\/+$/, "");
+const KEYFILE = path.join(process.env.COMMONROOM_DATA || path.join(import.meta.dirname, "..", ".data"), "agent-keys.json");
+let KEY = process.env.COMMONROOM_KEY;
+if (!KEY) {
+  try { KEY = JSON.parse(fs.readFileSync(KEYFILE, "utf8"))[handle]; } catch {}
+  if (!KEY) { console.error(`No key: set COMMONROOM_KEY, or start the server once so ${KEYFILE} has @${handle}.`); process.exit(2); }
+}
+
+const api = client(BASE, KEY);
 const say = (msg) => console.log(`[@${handle}] ${msg}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const quiet = (e) => e.status === 409; // someone else got there first: normal when several agents run
 
-async function api(method, path, body) {
-  const res = await fetch(BASE + path, {
-    method, body: body && JSON.stringify(body),
-    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${data.error}`);
-  return data;
-}
-
-async function executor() {
-  say(`waiting for jobs${tamper ? " (TAMPER mode: will drop a row)" : ""}`);
-  for (;;) {
-    for (const j of await api("GET", "/api/jobs?role=executor")) {
-      const r = dedupe(j.csv, j.key_column);
-      // Tamper: drop the last row but keep the honest counts and hash. The server must catch the lie.
-      if (tamper) r.output_csv = r.output_csv.split("\n").slice(0, -1).join("\n");
-      const done = await api("POST", `/api/jobs/${j.id}/result`, r);
-      say(`${j.id}: submitted ${r.summary.output_rows} rows -> ${done.status}`);
+async function executorTick(scopes) {
+  const home = await api("GET", "/v1/home");
+  if (scopes.includes("jobs:execute") && !lie) {
+    for (const j of home.jobs_you_can_claim.slice(0, 1)) {
+      await api("POST", `/v1/jobs/${j.id}/claim`);
+      say(`claimed ${j.id}: ${j.task}`);
     }
-    await sleep(1000);
+  }
+  for (const { id } of home.jobs_assigned_to_you.slice(0, 1)) {
+    const job = await api("GET", `/v1/jobs/${id}`);
+    const r = doTask(job, { lie });
+    const done = await api("POST", `/v1/jobs/${id}/result`, r);
+    const failed = done.checks.filter((c) => !c.passed).map((c) => c.label);
+    say(`${id}: submitted "${r.claim ?? "done"}" -> ${done.status}${failed.length ? ` (failed: ${failed.join("; ")})` : ""}`);
   }
 }
 
-async function verifier() {
-  say("waiting for jobs to verify");
-  for (;;) {
-    for (const j of await api("GET", "/api/jobs?role=verifier")) {
-      const mine = dedupe(j.csv, j.key_column);
-      let ok = mine.sha256 === j.result.sha256;
-      let note = ok ? "Re-derived the output; hashes match." : "My re-derived output hashes differently.";
-      if (handle === "recount") {
-        const counts = JSON.stringify(mine.summary) === JSON.stringify(j.result.summary);
-        ok &&= counts;
-        note += counts ? " Counts check out." : " Reported counts are wrong.";
-      }
-      const done = await api("POST", `/api/jobs/${j.id}/verdicts`, { verdict: ok ? "pass" : "fail", sha256: mine.sha256, note });
-      say(`${j.id}: ${ok ? "pass" : "fail"} -> ${done.status}`);
-    }
-    await sleep(1000);
+async function verifierTick() {
+  const home = await api("GET", "/v1/home");
+  for (const { id } of home.jobs_you_can_verify.slice(0, 1)) {
+    const job = await api("GET", `/v1/jobs/${id}`);
+    const v = audit(job);
+    const done = await api("POST", `/v1/jobs/${id}/verdicts`, v);
+    say(`${id}: ${v.verdict} (${v.note}) -> ${done.status}`);
   }
 }
 
-const SOURCES = `url,title,found_by
-https://example.org/tools/a,Tool A,scout
-https://example.org/tools/b,Tool B,scout
-https://Example.org/tools/a/,Tool A (again),ledger
-https://example.org/tools/c,Tool C,scout
-https://example.org/tools/b ,Tool B (again),ledger
-https://example.org/tools/d,Tool D,scout`;
+const me = await api("GET", "/v1/me");
+if (me.type !== "agent") { console.error("That key isn't an agent key."); process.exit(2); }
+const caps = me.agent.capabilities.map((c) => c.name);
+const tick = caps.includes("csv.dedupe") || caps.includes("leads.extract") ? () => executorTick(me.scopes)
+  : caps.includes("jobs.verify") ? verifierTick : null;
 
-async function requester() {
-  const post = await api("POST", "/api/posts", {
-    kind: "ask", title: "Need this source list deduped by url",
-    body: `Six sources from two crawls. Some urls differ only by case, spaces or a trailing slash.\n\n${SOURCES}`,
-  });
-  say(`posted ask ${post.id}`);
-  const job = await api("POST", "/api/jobs", { executor: "tidy", csv: SOURCES, key_column: "url", post_id: post.id, verifiers_required: 2 });
-  say(`hired @tidy: ${job.id}`);
-  let j = job;
-  while (["queued", "verifying"].includes(j.status)) { await sleep(800); j = await api("GET", `/api/jobs/${job.id}`); }
-  say(`job ${j.status}: ${j.events.at(-1).text}`);
-  if (j.status === "succeeded") say(`published receipt ${(await api("POST", `/api/jobs/${j.id}/publish`)).id}`);
+if (!tick) {
+  console.log(JSON.stringify(await api("GET", "/v1/home"), null, 2));
+  process.exit(0);
 }
-
-const me = await api("GET", "/api/me");
-if (me.caps.includes("csv.dedupe")) await executor();
-else if (me.caps.includes("csv.verify")) await verifier();
-else await requester();
+say(`${me.agent.status}; offers ${caps.join(", ")}; scopes ${me.scopes.join(", ") || "none"}${lie ? "; LYING mode" : ""}. Checking in every 2s.`);
+let stopping = false;
+process.on("SIGINT", () => { stopping = true; });
+while (!stopping) {
+  try { await tick(); } catch (e) { if (!quiet(e)) say(`error: ${e.message}${e.code ? ` (${e.code})` : ""}`); }
+  await sleep(2000);
+}

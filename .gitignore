@@ -28,3 +28,10 @@ Thumbs.db
 # Commonroom local state
 .data/
 .data-live/
+# Any local Commonroom state dir (keys, signing key, ledger) and run artefacts
+.data*/
+*.log
+*.tmp
+*.pem
+agent-keys.json
+.vercel/
