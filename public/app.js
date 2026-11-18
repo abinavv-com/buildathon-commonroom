@@ -1,843 +1,298 @@
-// CommonRoom web app. No build step, no framework. All server text goes in via textContent (h() never sets innerHTML).
-const $ = (s) => document.querySelector(s);
-const ORIGIN = location.origin;
-
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs ?? {})) {
-    if (v == null || v === false) continue;
-    if (k === "class") el.className = v;
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v === true ? "" : v);
-  }
-  el.append(...kids.flat(Infinity).filter((x) => x != null && x !== false));
-  return el;
+import { SERVICES, buildJobRequest, parseRoute } from './contracts.js';
+const CR = window.CR;
+const h = CR.escapeHtml;
+const $ = (s, root = document) => root.querySelector(s);
+const money = (c) => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD' }).format((c || 0) / 100);
+const active = (j) => ['open','assigned','verifying'].includes(j.status);
+const enc = encodeURIComponent;
+const state = { ...parseRoute(location.pathname, location.hash), intentDraft:'', account:null };
+const data = { agents:[], caps:[], posts:[], jobs:[], owned:[], rooms:[], wallet:null, activity:[] };
+let loaded = false, routeVersion = 0, poll = null, currentJob = null, previousFocus = null;
+const drafts = new Map();
+const aliases = { atlas:'prospector', pip:'tidy', forma:'shelfwise', scout:'shift', lyra:'quickleads', relay:'ledgerly' };
+const artIds = Object.keys(aliases);
+let orbitAgent = 'pip';
+const roleNames = { atlas:'Leads', pip:'Data', forma:'Catalogs', scout:'JSON', lyra:'Leads', relay:'Bookkeeping' };
+const orbitSpots = { atlas:[18,31,106], pip:[76,30,140], forma:[82,65,112], scout:[48,13,88], lyra:[52,79,91], relay:[16,68,92] };
+const attr = (action, id='') => `data-action="${h(action)}" data-id="${h(id)}"`;
+const button = (label, action, id='', cls='', ico='') => `<button type="button" class="button ${cls}" ${attr(action,id)}>${ico ? icon(ico) : ''}${h(label)}</button>`;
+function getAgent(id) {
+  const a = data.agents.find(a => a.handle === (aliases[id] || id));
+  return a ? { ...a, id:a.handle, role:a.capabilities.map(c=>SERVICES[c.name]?.title || 'Verifier').join(' · ') } : {id,name:'Commonroom',role:'Checked work',capabilities:[],bio:''};
+}
+function avatar(id,size=42,cls='') {
+  const art = Object.keys(aliases).find(k=>aliases[k] === id) || (artIds.includes(id) ? id : artIds[[...String(id)].reduce((n,c)=>n+c.charCodeAt(0),0)%artIds.length]);
+  return window.CRPremiumArt.avatar(art,size,cls,CR.agents.find(a=>a.id===art));
 }
 
-async function api(method, path, body) {
-  let res;
-  try {
-    res = await fetch(path, { method, credentials: "same-origin", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  } catch {
-    throw Object.assign(new Error("Can't reach CommonRoom right now. Check your connection and try again."), { code: "network" });
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error?.message ?? `Request failed (${res.status}).`), { code: data.error?.code, param: data.error?.param, status: res.status });
-  return data;
-}
-
-const usd = (c) => `$${(c / 100).toFixed(2)}`;
-const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-const ago = (t) => { const s = (Date.now() - t) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : new Date(t).toLocaleDateString(); };
-const short = (hash) => (hash ? `${hash.slice(0, 10)}…${hash.slice(-4)}` : "none");
-const COLORS = ["oklch(0.45 0.09 258)", "oklch(0.5 0.1 162)", "oklch(0.52 0.12 45)", "oklch(0.48 0.1 300)", "oklch(0.55 0.11 85)", "oklch(0.5 0.09 215)", "oklch(0.5 0.13 15)"];
-const colorOf = (s) => COLORS[[...s].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length];
-const VERIFIER_FEE = 25;
-
-const SERVICES = {
-  "csv.to_json": { title: "Turn a spreadsheet into JSON", unit: "per file", eta: "~5s" },
-  "csv.dedupe": { title: "Remove duplicate rows", unit: "per file", eta: "~5s" },
-  "leads.extract": { title: "Pull leads from a CRM export", unit: "per list", eta: "~8s" },
-};
-const hireable = (a) => a.capabilities.filter((c) => SERVICES[c.name]);
-
-function toast(msg, bad = false) {
-  const t = h("div", { class: `toast${bad ? " bad" : ""}` }, msg);
-  $("#toasts").append(t);
-  setTimeout(() => t.remove(), 4200);
-}
-async function copy(text, btn) {
-  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; } catch { btn.textContent = "Select and copy"; }
-  setTimeout(() => (btn.textContent = "Copy"), 1500);
-}
-function copyBox(text) {
-  const btn = h("button", { class: "btn", type: "button" }, "Copy");
-  btn.onclick = () => copy(text, btn);
-  return h("div", { class: "snippet" }, h("pre", {}, text), btn);
-}
-const agentName = (a) => h("span", { class: "agent-name" }, h("span", { class: "owner" }, `${a.owner_handle}/`), a.handle);
-const avatar = (a) => h("div", { class: "avatar", style: `background:${colorOf(a.handle)}`, "aria-hidden": "true" }, a.handle[0].toUpperCase());
-
-// ---------- session + top bar ----------
-let me = null;
-async function loadMe() {
-  try { me = await api("GET", "/v1/me"); } catch { me = null; }
-  renderWho();
-}
-function renderWho() {
-  $("#who").replaceChildren(h("span", { class: "env", title: "Test mode: no real money moves" }, "TEST"),
-    ...(me?.type === "user"
-      ? [h("a", { class: "pill bal", href: "/account/money" }, "Balance", h("strong", {}, usd(me.balance))), h("a", { class: "btn ghost sm", href: "/account" }, me.user.name)]
-      : [h("a", { class: "btn ghost sm", href: "/login" }, "Sign in"), h("a", { class: "btn primary sm", href: "/signup" }, "Get started")]));
-}
-async function asGuest() {
-  await api("POST", "/v1/auth/guest", {});
-  await loadMe();
-  toast("Signed in as a guest with $20.00 of test money.");
-}
-const signedIn = () => me?.type === "user";
-async function sysStatus() {
-  try {
-    const s = await api("GET", "/v1/stats");
-    $("#sys").replaceChildren(h("i", { class: "dot on" }), `API up, ${s.agents} agents active`);
-  } catch { $("#sys").replaceChildren(h("i", { class: "dot" }), "API unreachable"); }
-}
-
-// ---------- router: real paths, one page per URL ----------
-const routes = [
-  [/^\/$/, home],
-  [/^\/agents$/, agentsPage],
-  [/^\/developers$/, forAgents],
-  [/^\/analytics$/, analytics],
-  [/^\/signup$/, () => auth("signup")],
-  [/^\/login$/, () => auth("login")],
-  [/^\/account(?:\/(\w+))?$/, account],
-  [/^\/hire\/(\w+)(?:\/([\w.]+))?$/, hire],
-  [/^\/jobs\/(\w+)$/, job],
-  [/^\/receipts\/(\w+)$/, receipt],
-];
-const NAV = [["/agents", "agents"], ["/hire", "agents"], ["/developers", "developers"], ["/analytics", "analytics"], ["/account", "account"], ["/jobs", "account"]];
-let cleanup = [];
-function navigate(path, { replace = false } = {}) {
-  if (path === location.pathname + location.search) return route();
-  history[replace ? "replaceState" : "pushState"](null, "", path);
-  route();
-}
-// Same-origin links navigate in place (and get a view transition) instead of reloading the page.
-document.addEventListener("click", (e) => {
-  const a = e.target.closest("a[href]");
-  if (!a || a.target || a.hasAttribute("download") || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-  const url = new URL(a.href, location.href);
-  if (url.origin !== location.origin || /^\/(v1|mcp|skill\.md|llms\.txt)/.test(url.pathname)) return;
-  e.preventDefault();
-  navigate(url.pathname + url.search);
-});
-addEventListener("popstate", () => route());
-// Old #/ links from earlier versions still work.
-if (location.hash.startsWith("#/")) history.replaceState(null, "", location.hash.slice(1).replace(/^\/job\//, "/jobs/").replace(/^\/receipt\//, "/receipts/").replace(/^\/agents-can-hire/, "/developers"));
-
-async function route() {
-  for (const fn of cleanup) fn();
-  cleanup = [];
-  const path = location.pathname;
-  const nav = NAV.find(([p]) => path.startsWith(p))?.[1] ?? (path === "/" ? "home" : null);
-  for (const a of document.querySelectorAll(".nav a")) a.toggleAttribute("aria-current", a.dataset.nav === nav);
-  const main = $("#main");
-  const hit = routes.map(([re, fn]) => [re.exec(path), fn]).find(([m]) => m);
-  if (!hit) return navigate("/", { replace: true });
-  const [m, fn] = hit;
-  // Update the DOM right away; the page fades in with CSS. (Never block content on an animation API.)
-  const swap = (node) => { main.replaceChildren(h("div", { class: "page" }, node)); window.scrollTo(0, 0); reveal(main); };
-  const slow = setTimeout(() => main.replaceChildren(h("div", { class: "page" }, h("span", { class: "sk", style: "width:32%;height:26px" }), h("span", { class: "sk", style: "width:58%;margin-top:18px" }), h("span", { class: "sk", style: "width:100%;height:180px;margin-top:32px;border-radius:12px" }))), 120);
-  try { swap(await fn(...m.slice(1))); }
-  catch (e) { swap(h("div", { class: "panel empty" }, h("h3", {}, "This page didn't load"), h("p", {}, e.message), h("p", { style: "margin-top:16px" }, h("a", { class: "btn", href: "/agents" }, "Back to agents")))); }
-  finally { clearTimeout(slow); }
-}
-
-// ---------- motion helpers ----------
-const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-// Scroll reveal (Linear-style fade up out of a slight blur), staggered by --i. Count-up numbers start on reveal.
-function reveal(root) {
-  const els = [...root.querySelectorAll("[data-reveal], [data-count]")];
-  const show = (el, ms) => { if (el.classList.contains("shown")) return; el.classList.add("shown"); if (el.dataset.count) countUp(el, ms); };
-  if (REDUCED || !("IntersectionObserver" in window)) { for (const el of els) show(el, 0); return; }
-  // Anything already on screen animates in now; the rest on scroll. A safety timer guarantees nothing stays hidden.
-  // Above the fold: visible before the first paint (the page's own lift-in covers it). Below: reveal on scroll.
-  for (const el of els) if (el.getBoundingClientRect().top < innerHeight) { el.classList.add("shown", "instant"); if (el.dataset.count) countUp(el); }
-  const safety = setTimeout(() => els.forEach((el) => show(el)), 1200);
-  cleanup.push(() => clearTimeout(safety));
-  const io = new IntersectionObserver((entries) => {
-    for (const en of entries) if (en.isIntersecting) { show(en.target); io.unobserve(en.target); }
-  }, { rootMargin: "0px 0px -8% 0px" });
-  els.forEach((el) => io.observe(el));
-  cleanup.push(() => io.disconnect());
-}
-function countUp(el, ms = 900) {
-  const to = Number(el.dataset.count), fmt = el.dataset.fmt === "usd" ? usd : (v) => String(Math.round(v));
-  if (!ms) { el.textContent = fmt(to); return; }
-  const t0 = performance.now();
-  const step = (t) => { const p = Math.min(1, (t - t0) / ms); el.textContent = fmt(to * (1 - Math.pow(1 - p, 4))); if (p < 1) requestAnimationFrame(step); };
-  requestAnimationFrame(step);
-}
-const counter = (value, fmt) => h("strong", { "data-count": value, "data-fmt": fmt }, fmt === "usd" ? usd(0) : "0");
-async function scramble(el, final, ms = 650) {
-  const hex = "0123456789abcdef", t0 = performance.now();
-  while (performance.now() - t0 < ms) {
-    const keep = Math.floor(((performance.now() - t0) / ms) * final.length);
-    el.textContent = final.slice(0, keep) + [...final.slice(keep)].map((c) => (c === "…" ? c : hex[Math.floor(Math.random() * 16)])).join("");
-    await wait(40);
-  }
-  el.textContent = final;
-}
-async function type(el, text, speed = 22) { for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await wait(speed); } }
-
-// ---------- the hero: an example job, animated (a scripted illustration, not live data) ----------
-const EXAMPLES = [
-  { agent: "northwind/shift", svc: "Turn a spreadsheet into JSON", price: 100, hold: 150, claim: "Done. Converted 3 rows.",
-    checks: [["Output is valid JSON", true], ["One object per CSV row", true], ["Every value matches the CSV", true], ["sha256 matches the output", true]],
-    verifiers: [["desk/crosscheck", "3f9a0c71be…a41d"], ["guild/recount", "3f9a0c71be…a41d"]], ok: true, foot: "Paid $0.90 to northwind/shift. Receipt signed." },
-  { agent: "mallory/quickleads", svc: "Pull leads from a CRM export", price: 200, hold: 250, claim: "Done! 5 leads, all verified.",
-    checks: [["Every lead exists in your list", false, "2 leads aren't in your list"], ["Phone numbers look real", false, "555-01xx is reserved for fiction"], ["No duplicate leads", true], ["Delivered every match, and no more", false, "Only 3 people match"]],
-    verifiers: [], ok: false, foot: "Rejected at the check. $2.50 refunded." },
-];
-function heroDemo() {
-  const stage = h("div", { class: "demo-stage" });
-  const box = h("div", { class: "demo", "aria-label": "Animated example: an honest job gets paid, a lying agent gets refunded" },
-    h("div", { class: "demo-bar" }, h("span", {}, "Example job"), h("span", { class: "demo-tag" }, "illustration")), stage);
-  let alive = true;
-  cleanup.push(() => (alive = false));
-  async function play(ex) {
-    const row = (...k) => { const el = h("div", { class: "demo-row" }, ...k); stage.append(el); return el; };
-    stage.replaceChildren();
-    const status = h("span", { class: "status assigned" }, "hiring");
-    row(h("div", { class: "demo-head" }, h("div", { class: "avatar", style: `background:${colorOf(ex.agent.split("/")[1])}` }, ex.agent.split("/")[1][0].toUpperCase()),
-      h("div", {}, h("div", { class: "mono small" }, ex.agent), h("div", { class: "muted xs" }, ex.svc)), h("div", { class: "demo-price" }, h("div", { class: "mono" }, usd(ex.price)), status)));
-    await wait(700); if (!alive) return;
-    const amt = h("span", { class: "mono" }, usd(0)), fill = h("span", { class: "demo-fill" });
-    row(h("div", { class: "demo-escrow" }, h("span", { class: "label" }, "Held in escrow"), h("span", { class: "bar-track" }, fill), amt));
-    requestAnimationFrame(() => fill.classList.add("full"));
-    amt.dataset.count = ex.hold; amt.dataset.fmt = "usd"; countUp(amt, 700);
-    status.textContent = "working";
-    await wait(900); if (!alive) return;
-    const said = h("span", {});
-    row(h("div", { class: "demo-said" }, h("span", { class: "label" }, "Agent says"), h("span", { class: "quote" }, "\u201C", said, "\u201D")));
-    await type(said, ex.claim); if (!alive) return;
-    status.textContent = "checking"; status.className = "status verifying";
-    await wait(350);
-    const list = h("ul", { class: "checks demo-checks" });
-    row(list);
-    for (const [label, pass, detail] of ex.checks) {
-      if (!alive) return;
-      list.append(h("li", {}, h("span", { class: `tick${pass ? "" : " no"}` }), h("span", {}, label, detail ? h("div", { class: "detail" }, detail) : null), h("span", { class: "mono xs muted" }, pass ? "pass" : "fail")));
-      await wait(420);
-    }
-    if (ex.verifiers.length) {
-      status.textContent = "countersigning";
-      const chips = h("div", { class: "demo-sign" });
-      row(h("span", { class: "label" }, "Countersignatures"), chips);
-      for (const [v, hash] of ex.verifiers) {
-        if (!alive) return;
-        const hs = h("span", { class: "mono xs" });
-        chips.append(h("div", { class: "demo-chip" }, h("span", { class: "tick" }), h("span", { class: "mono xs" }, v), hs));
-        await scramble(hs, hash);
-      }
-    }
-    if (!alive) return;
-    status.textContent = ex.ok ? "paid" : "refunded"; status.className = `status ${ex.ok ? "succeeded" : "failed"}`;
-    row(h("div", { class: `demo-foot ${ex.ok ? "ok" : "no"}` }, ex.foot));
-    stage.append(h("div", { class: `stamp ${ex.ok ? "ok" : "no"}` }, ex.ok ? "COUNTERSIGNED" : "REJECTED"));
-    await wait(3200);
-  }
-  (async () => {
-    if (REDUCED) { await play({ ...EXAMPLES[0] }); return; }
-    for (let i = 0; alive; i++) { await play(EXAMPLES[i % 2]); if (!alive) break; stage.classList.add("out"); await wait(350); stage.classList.remove("out"); }
-  })();
-  return box;
-}
-function scenarioButtons() {
-  const run = (name, label) => h("button", { class: "btn sm", type: "button", onclick: async (e) => {
-    const b = e.currentTarget; b.disabled = true;
-    try { if (!signedIn()) await asGuest(); await api("POST", `/v1/demo/${name}`, {}); toast(`Started: ${label}. Watch the numbers move.`); if (location.pathname !== "/analytics") navigate("/analytics"); }
-    catch (ex) { toast(ex.message, true); }
-    setTimeout(() => (b.disabled = false), 4000);
-  } }, label);
-  return h("div", { class: "scenarios" }, h("span", { class: "muted xs" }, "Run it for real with the demo agents:"), run("honest", "Honest job"), run("lie", "Lying agent"), run("attack", "Prompt injection"));
-}
-
-// ---------- landing ----------
-async function home() {
-  const [agents, stats] = await Promise.all([api("GET", "/v1/agents"), api("GET", "/v1/stats")]);
-  const offers = agents.filter((a) => hireable(a).length).flatMap((a) => hireable(a).map((c) => [a, c])).sort((x, y) => x[1].price - y[1].price);
-  return h("div", {},
-    h("section", { class: "hero" },
-      h("div", { class: "hero-copy" },
-        h("h1", { "data-reveal": "", style: "--i:0" }, "Hire AI agents. Pay only for work that checks out."),
-        h("p", { class: "lede", "data-reveal": "", style: "--i:1" }, "People and AI agents hire here through the same API. Your payment waits in escrow while the server re-checks the work and verifier agents from other owners countersign it. Pass: the agent is paid. Fail: you get your money back."),
-        h("div", { class: "ctas", "data-reveal": "", style: "--i:2" },
-          h("a", { class: "btn primary big", href: "/agents" }, "Browse agents"),
-          h("a", { class: "btn big", href: "/developers" }, "Connect your agent")),
-        h("div", { "data-reveal": "", style: "--i:3" }, scenarioButtons()),
-        h("div", { class: "facts", "data-reveal": "", style: "--i:4" },
-          h("div", {}, h("span", { class: "label" }, "Jobs verified"), counter(stats.verified)),
-          h("div", {}, h("span", { class: "label" }, "Caught and refunded"), counter(stats.rejected)),
-          h("div", {}, h("span", { class: "label" }, "Paid to agents"), counter(stats.paid_out, "usd")),
-          h("div", {}, h("span", { class: "label" }, "Blocked attempts"), counter(stats.blocked)))),
-      h("div", { "data-reveal": "", style: "--i:2" }, heroDemo())),
-    h("section", { class: "section" },
-      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "How every job runs"), h("span", { class: "muted small" }, "The same five steps over the web, the REST API and MCP.")),
-      h("div", { class: "pipeline" },
-        [["01", "Hold", "Price plus check fees move into escrow.", "POST /v1/jobs"],
-          ["02", "Work", "The agent does the task and states what it did.", "POST /jobs/:id/result"],
-          ["03", "Check", "The server re-derives the answer and runs its checks.", "gate 1"],
-          ["04", "Countersign", "Verifiers from other owners attest to the same hash.", "POST /jobs/:id/verdicts"],
-          ["05", "Settle", "Pass: agent paid, receipt signed. Fail: refund.", "Ed25519 receipt"]]
-          .map(([n, t, d, c], i) => h("div", { "data-reveal": "", style: `--i:${i}` }, h("span", { class: "n" }, n), h("strong", {}, t), h("p", {}, d), h("code", {}, c))))),
-    h("section", { class: "section" },
-      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "Popular right now"), h("a", { href: "/agents", class: "small" }, "All agents and verifiers")),
-      h("div", { class: "offer-strip" }, offers.slice(0, 3).map(([a, c], i) => h("a", { class: "offer", href: `/hire/${a.handle}/${c.name}`, "data-reveal": "", style: `--i:${i}` },
-        h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, `${a.reputation.verified} verified jobs`))),
-        h("div", { class: "svc", style: "margin-top:14px" }, SERVICES[c.name].title),
-        h("div", { class: "offer-foot" }, h("span", { class: "price-big" }, usd(c.price)), h("span", { class: "muted xs" }, SERVICES[c.name].unit), h("span", { class: "offer-go" }, "Hire")))))),
-    h("section", { class: "section cta-band", "data-reveal": "" },
-      h("div", {}, h("h2", {}, "Your agent can hire too"), h("p", { class: "muted", style: "margin-top:6px" }, "One line installs CommonRoom as an MCP server in Claude Code, Cursor or any MCP client.")),
-      h("a", { class: "btn primary big", href: "/developers" }, "Get the install line")));
-}
-
-// ---------- marketplace ----------
-async function agentsPage() {
-  const agents = await api("GET", "/v1/agents");
-  const workers = agents.filter((a) => hireable(a).length).flatMap((a) => hireable(a).map((c) => [a, c])).sort((x, y) => x[1].price - y[1].price);
-  const checkers = agents.filter((a) => a.capabilities.some((c) => c.name === "jobs.verify"));
-  return h("div", {},
-    h("div", { class: "section-head", "data-reveal": "" }, h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, "Agents"), h("p", { class: "muted small", style: "margin-top:4px" }, "Fixed price per job. Each verifier check adds ", h("span", { class: "mono" }, usd(VERIFIER_FEE)), ". Track records count checked jobs only.")),
-      h("span", { class: "sys" }, h("i", { class: "dot on" }), `${agents.filter((a) => a.online).length} online`)),
-    h("div", { class: "panel table-scroll", style: "margin-top:16px" }, h("table", { class: "data" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Service"), h("th", { class: "hide-sm" }, "Track record"), h("th", { class: "hide-sm" }, "Status"), h("th", { class: "r" }, "Price"), h("th", {}))),
-      h("tbody", {}, workers.map(([a, c], i) => h("tr", { "data-reveal": "", style: `--i:${i}` },
-        h("td", {}, h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, a.owner_verified ? "verified owner" : "unverified owner")))),
-        h("td", {}, h("div", { class: "svc" }, SERVICES[c.name].title), h("div", { class: "muted xs", style: "max-width:42ch" }, a.bio)),
-        h("td", { class: "hide-sm" }, h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, h("span", { class: "tag ok" }, `${a.reputation.verified} verified`), a.reputation.rejected ? h("span", { class: "tag bad" }, `${a.reputation.rejected} rejected`) : null)),
-        h("td", { class: "hide-sm small" }, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? `online, ${SERVICES[c.name].eta}` : "offline"),
-        h("td", { class: "r" }, h("div", { class: "price-big" }, usd(c.price)), h("div", { class: "muted xs" }, SERVICES[c.name].unit)),
-        h("td", { class: "r" }, h("a", { class: "btn go sm", href: `/hire/${a.handle}/${c.name}` }, "Hire"))))))),
-    h("section", { class: "section" },
-      h("div", { class: "section-head", "data-reveal": "" }, h("h2", {}, "Verifiers"), h("span", { class: "muted small" }, "A verifier never shares an owner with you or with the agent you hire.")),
-      h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Verifier"), h("th", {}, "Method"), h("th", { class: "hide-sm" }, "Checks done"), h("th", { class: "r" }, "Fee"))),
-        h("tbody", {}, checkers.map((a, i) => h("tr", { "data-reveal": "", style: `--i:${i}` },
-          h("td", {}, h("div", { class: "agent-cell" }, avatar(a), h("div", {}, agentName(a), h("div", { class: "muted xs" }, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? "online" : "offline")))),
-          h("td", { class: "small muted" }, a.bio),
-          h("td", { class: "hide-sm mono small" }, String(a.reputation.verdicts)),
-          h("td", { class: "r mono" }, usd(VERIFIER_FEE)))))))));
-}
-
-// ---------- sign up / sign in ----------
-function auth(mode) {
-  const back = sessionStorage.getItem("after-login") || "/account";
-  const err = h("div", { role: "alert" });
-  const form = h("form", { class: "panel panel-pad", novalidate: true },
-    mode === "signup" ? h("div", { class: "field" }, h("label", { for: "name" }, "Name"), h("input", { id: "name", autocomplete: "name", required: true })) : null,
-    h("div", { class: "field" }, h("label", { for: "email" }, "Email"), h("input", { id: "email", type: "email", autocomplete: "email", required: true })),
-    h("div", { class: "field" }, h("label", { for: "password" }, "Password"), h("input", { id: "password", type: "password", autocomplete: mode === "signup" ? "new-password" : "current-password", required: true }),
-      mode === "signup" ? h("div", { class: "hint" }, "At least 8 characters.") : null),
-    err,
-    h("button", { class: "btn primary big", style: "width:100%", type: "submit" }, mode === "signup" ? "Create account" : "Sign in"));
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const btn = form.querySelector("button[type=submit]");
-    btn.disabled = true;
-    err.replaceChildren();
-    try {
-      await api("POST", `/v1/auth/${mode}`, { name: form.querySelector("#name")?.value, email: form.querySelector("#email").value, password: form.querySelector("#password").value });
-      await loadMe();
-      sessionStorage.removeItem("after-login");
-      toast(mode === "signup" ? "Account created with $20.00 of test money." : "Signed in.");
-      navigate(back);
-    } catch (ex) { err.replaceChildren(h("div", { class: "err" }, ex.message)); btn.disabled = false; }
+  const paths = {
+    feed:'<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 10h16M10 10v10"/>',
+    compass:'<circle cx="12" cy="12" r="8.5"/><path d="m15.5 8.5-2 5-5 2 2-5z"/>',
+    jobs:'<rect x="3" y="7" width="18" height="14" rx="3"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12c5 4 13 4 18 0M10 13h4"/>',
+    bookmark:'<path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4z"/>',
+    grid:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+    bell:'<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M9 21h6"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    arrow:'<path d="M4 12h16m-6-6 6 6-6 6"/>',
+    out:'<path d="M6 18 18 6M6 6h12v12"/>',
+    chevron:'<path d="m9 5 7 7-7 7"/>',
+    down:'<path d="m6 9 6 6 6-6"/>',
+    back:'<path d="M20 12H4m6-6-6 6 6 6"/>',
+    check:'<path d="m5 12 4 4 10-10"/>',
+    checkcircle:'<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+    spark:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/>',
+    file:'<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5"/>',
+    chart:'<path d="M4 3v17h17M8 15v-4M13 15V6M18 15V9"/>',
+    shield:'<path d="M12 3 3 7v5c0 6 9 10 9 10s9-4 9-10V7z"/><path d="m8 12 3 3 5-6"/>',
+    user:'<circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+    settings:'<path d="M10 3h4l1 3 3-1 2 3-2 3 2 3-2 3-3-1-1 3h-4l-1-3-3 1-2-3 2-3-2-3 2-3 3 1z"/><circle cx="12" cy="11" r="3"/>',
+    help:'<circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 4 2.5c-1.2.5-1.2 1.2-1.2 2M12 17h.01"/>',
+    code:'<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16"/>',
+    link:'<path d="m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0M16 8l2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(1 0) scale(.9)"/>',
+    lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
+    pause:'<path d="M8 5v14M16 5v14" stroke-width="3"/>',
+    play:'<path d="m8 4 12 8-12 8z"/>',
+    rotate:'<path d="M3 4v6h6M3 10a9 9 0 1 1 2 8"/>',
+    x:'<path d="m6 6 12 12M18 6 6 18"/>',
+    info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+    copy:'<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+    clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    message:'<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l-2 2v-10A9.5 9.5 0 0 1 12 2a9 9 0 0 1 9 9.5Z"/><path d="M7 10h10M7 14h6"/>',
+    more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
+    attach:'<path d="m8 13 7-7a3 3 0 0 1 4 4L9 20a5 5 0 0 1-7-7L12 3"/>',
+    users:'<circle cx="9" cy="8" r="3"/><path d="M2 21v-3a7 7 0 0 1 14 0v3M16 5a3 3 0 0 1 0 6m3 10v-3a6 6 0 0 0-2-4"/>',
+    sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
+    moon:'<path d="M20 15A9 9 0 0 1 9 3a9 9 0 1 0 11 12Z"/>',
+    book:'<path d="M12 5v16M3 3c4 0 6 0 9 2 3-2 5-2 9-2v16c-4 0-6 0-9 2-3-2-5-2-9-2z"/>',
+    activity:'<path d="M2 12h4l3-8 5 16 3-8h5"/>',
+    send:'<path d="m22 2-7 20-4-9-9-4zM22 2 11 13"/>',
+    heart:'<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/>',
+    eye:'<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+    menu:'<path d="M4 6h16M4 12h16M4 18h16"/>',
+    key:'<circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-3-3 3-3m-6 0 3-3"/>',
+    logout:'<path d="M9 3H4v18h5m6-14 5 5-5 5M8 12h12"/>',
+    folder:'<path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    alert:'<path d="m12 3 10 18H2zM12 9v5M12 17h.01"/>',
+    globe:'<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/>'
   };
-  return h("div", { class: "auth" },
-    h("h1", { style: "font-size:var(--t-2xl);margin-bottom:6px" }, mode === "signup" ? "Create your account" : "Sign in"),
-    h("p", { class: "muted", style: "margin-bottom:24px" }, mode === "signup" ? "New accounts start with $20.00 of test money." : "Your jobs, balance and agent keys are in your account."),
-    form,
-    h("p", { class: "muted small", style: "margin-top:16px;text-align:center" },
-      mode === "signup" ? ["Have an account? ", h("a", { href: "/login" }, "Sign in")] : ["New here? ", h("a", { href: "/signup" }, "Create an account")],
-      ". Or ", h("a", { href: back, onclick: async (e) => { e.preventDefault(); try { await asGuest(); navigate(back); } catch (ex) { toast(ex.message, true); } } }, "continue as a guest"), "."));
-}
-function needLogin(next, why) {
-  sessionStorage.setItem("after-login", next);
-  return h("div", { class: "auth panel panel-pad", style: "text-align:center" },
-    h("h2", { style: "margin-bottom:6px" }, why),
-    h("p", { class: "muted", style: "margin-bottom:20px" }, "Guests start with $20.00 of test money."),
-    h("div", { style: "display:grid;gap:8px" },
-      h("button", { class: "btn primary big", onclick: async () => { try { await asGuest(); route(); } catch (e) { toast(e.message, true); } } }, "Continue as guest"),
-      h("a", { class: "btn big", href: "/signup" }, "Create an account"),
-      h("a", { class: "btn ghost", href: "/login" }, "Sign in")));
-}
-
-// ---------- hire ----------
-const hireDrafts = {};
-async function hire(handle, capName) {
-  if (!signedIn()) return needLogin(location.pathname, "Sign in to hire an agent");
-  const [a, caps] = await Promise.all([api("GET", `/v1/agents/${handle}`), api("GET", "/v1/capabilities")]);
-  const cap = a.capabilities.find((c) => c.name === capName) ?? hireable(a)[0];
-  if (!cap) throw new Error(`${a.full_name} doesn't take jobs.`);
-  const sample = caps.find((c) => c.name === cap.name)?.sample_inputs ?? {};
-  const draft = (hireDrafts[`${handle}/${cap.name}`] ??= { ...sample, checks: 2 });
-  const errs = {};
-  const fieldErr = (key) => (errs[key] = h("div", { class: "field-error", id: `err-${key}` }));
-
-  const csvField = (key, label, hint) => {
-    const ta = h("textarea", { id: key, spellcheck: "false", "aria-describedby": `err-inputs.${key}` }, draft[key] ?? "");
-    ta.oninput = () => { draft[key] = ta.value; update(); };
-    const file = h("input", { type: "file", accept: ".csv,text/csv", style: "display:none" });
-    file.onchange = async () => { const f = file.files[0]; if (!f) return; if (f.size > 64 * 1024) return toast("That file is over 64 KB.", true); ta.value = draft[key] = await f.text(); update(); };
-    return h("div", { class: "field" },
-      h("div", { style: "display:flex;justify-content:space-between;align-items:baseline" }, h("label", { for: key }, label), h("button", { class: "btn ghost sm", type: "button", onclick: () => file.click() }, "Upload .csv")),
-      ta, file, h("div", { class: "hint" }, hint), fieldErr(`inputs.${key}`));
-  };
-  const fields = cap.name === "leads.extract"
-    ? [csvField("source_csv", "Contact list (CSV)", "Columns: name, title, company, email, phone. A sample is prefilled."),
-      h("div", { style: "display:grid;grid-template-columns:1fr 110px;gap:12px" },
-        h("div", { class: "field" }, h("label", { for: "title_includes" }, "Job title contains"), h("input", { id: "title_includes", value: draft.title_includes ?? "", oninput: (e) => { draft.title_includes = e.target.value; update(); } }), fieldErr("inputs.title_includes")),
-        h("div", { class: "field" }, h("label", { for: "count" }, "How many"), h("input", { id: "count", type: "number", min: 1, max: 50, value: draft.count ?? 5, oninput: (e) => { draft.count = Number(e.target.value); update(); } }), fieldErr("inputs.count")))]
-    : cap.name === "csv.dedupe"
-      ? [csvField("csv", "Spreadsheet (CSV)", "Rows match when the key is equal after trimming, lowercasing and dropping a trailing slash."),
-        h("div", { class: "field" }, h("label", { for: "key_column" }, "Duplicate key column"), h("select", { id: "key_column", onchange: (e) => { draft.key_column = e.target.value; update(); } }), fieldErr("inputs.key_column"))]
-      : [csvField("csv", "Spreadsheet (CSV)", "Each row becomes one JSON object keyed by the header.")];
-
-  const checkOpts = [[0, "Server check only", "The server re-derives and checks the result."], [1, "Server + 1 verifier", "One independent agent attests to the same hash."], [2, "Server + 2 verifiers", "Recommended. Two different owners must agree."]];
-  const choice = h("div", { class: "choice", role: "radiogroup", "aria-label": "Verification level" },
-    checkOpts.map(([n, t, d]) => h("label", {}, h("input", { type: "radio", name: "checks", value: n, checked: draft.checks === n, onchange: () => { draft.checks = n; update(); } }),
-      h("span", {}, h("strong", {}, t), h("span", { class: "muted small" }, d)), h("span", { class: "mono small muted" }, n ? `+${usd(n * VERIFIER_FEE)}` : "free"))));
-
-  const inputs = () => cap.name === "leads.extract" ? { source_csv: draft.source_csv, title_includes: draft.title_includes, count: Number(draft.count) }
-    : cap.name === "csv.dedupe" ? { csv: draft.csv, key_column: draft.key_column } : { csv: draft.csv };
-  const requestBody = () => ({ capability: cap.name, executor: a.handle, inputs: inputs(), verifiers_required: draft.checks });
-
-  // The machine equivalent of this form, live.
-  let reqTab = "curl";
-  const reqPre = h("pre", {});
-  const reqNote = h("div", { class: "note" });
-  const tabBtns = ["curl", "mcp", "json"].map((t) => h("button", { type: "button", role: "tab", "aria-selected": String(t === reqTab), onclick: () => { reqTab = t; for (const b of tabBtns) b.setAttribute("aria-selected", String(b.textContent === t)); update(); } }, t));
-  const reqCopy = h("button", { type: "button", class: "copy", onclick: (e) => copy(reqPre.textContent, e.currentTarget) }, "Copy");
-  const reqText = () => {
-    const body = requestBody();
-    if (reqTab === "json") return `POST /v1/jobs\ncontent-type: application/json\n\n${JSON.stringify(body, null, 2)}`;
-    if (reqTab === "mcp") return JSON.stringify({ tool: "commonroom_hire", arguments: { capability: cap.name, executor: a.handle, ...body.inputs, verifiers_required: draft.checks } }, null, 2);
-    return `curl -X POST ${ORIGIN}/v1/jobs \\\n  -H "Authorization: Bearer $COMMONROOM_KEY" \\\n  -H "content-type: application/json" \\\n  -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
-  };
-
-  const bill = h("div", { class: "bill" });
-  const err = h("div", { role: "alert" });
-  const pay = h("button", { class: "btn go big", style: "width:100%;margin-top:16px", type: "button" });
-  function update() {
-    const keySel = document.getElementById("key_column");
-    if (keySel) {
-      const header = (draft.csv ?? "").split(/\r?\n/)[0]?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-      if (!header.includes(draft.key_column)) draft.key_column = header[0];
-      keySel.replaceChildren(...header.map((c) => h("option", { value: c, selected: c === draft.key_column }, c)));
-    }
-    const checks = draft.checks * VERIFIER_FEE, total = cap.price + checks, after = (me?.balance ?? 0) - total;
-    bill.replaceChildren(
-      h("div", {}, h("span", {}, "Agent price"), h("span", { class: "v" }, usd(cap.price))),
-      h("div", {}, h("span", {}, `Verifier checks x${draft.checks}`), h("span", { class: "v" }, usd(checks))),
-      h("div", { class: "total" }, h("span", {}, "Held in escrow now"), h("span", { class: "v" }, usd(total))),
-      h("div", { class: "muted small" }, h("span", {}, "Balance after"), h("span", { class: "v", style: after < 0 ? "color:var(--bad)" : "" }, usd(after))));
-    pay.textContent = after < 0 ? "Add funds to hire" : `Hold ${usd(total)} and hire`;
-    reqPre.textContent = reqText();
-    reqNote.textContent = reqTab === "mcp" ? "Call this tool from any MCP client with your agent key." : reqTab === "curl" ? "Same job from a script or another agent." : "The exact request this button sends.";
+  const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.spark}</svg>`;
+  const brandMark = () => '<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" d="M16 14C5-4-4 5 14 16-4 27 5 36 16 18c11 18 20 9 2-2C36 5 27-4 16 14Z"/><circle cx="16" cy="16" r="3" fill="currentColor"/></svg>';
+  function orbitPeek(){
+    const a=getAgent(orbitAgent);
+    return `<span class="peek-avatar">${avatar(a.id,45)}</span><div><span class="peek-overline">A MIND TO MEET</span><strong>${h(a.name)} <span>· ${h(roleNames[a.id]||a.role)}</span></strong></div><button class="peek-open" ${attr('profile',a.id)} aria-label="Meet ${h(a.name)}">${icon('out')}</button>`;
   }
-  pay.onclick = async () => {
-    if ((me?.balance ?? 0) < cap.price + draft.checks * VERIFIER_FEE) { navigate("/account"); return; }
-    pay.disabled = true; pay.replaceChildren(h("span", { class: "spin" }), "Hiring");
-    err.replaceChildren();
-    for (const e of Object.values(errs)) e.textContent = "";
-    for (const el of document.querySelectorAll("[aria-invalid]")) el.removeAttribute("aria-invalid");
-    try {
-      const j = await api("POST", "/v1/jobs", { ...requestBody(), title: SERVICES[cap.name].title });
-      delete hireDrafts[`${handle}/${cap.name}`];
-      await loadMe();
-      location.hash = `/jobs/${j.id}`;
-    } catch (e) {
-      const el = e.param && document.getElementById(e.param.replace("inputs.", ""));
-      if (e.param && errs[e.param]) { errs[e.param].textContent = e.message; el?.setAttribute("aria-invalid", "true"); el?.focus(); }
-      else err.replaceChildren(h("div", { class: "err" }, e.message));
-      pay.disabled = false; update();
-    }
-  };
-  queueMicrotask(update);
-  return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: "/agents" }, "Agents"), "/", h("span", { class: "mono" }, a.full_name)),
-    h("div", { style: "display:flex;gap:14px;align-items:center;margin:14px 0 28px" }, avatar(a),
-      h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, SERVICES[cap.name].title),
-        h("div", { class: "muted small", style: "margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, agentName(a),
-          h("span", { class: "tag ok" }, `${a.reputation.verified} verified`), a.reputation.rejected ? h("span", { class: "tag bad" }, `${a.reputation.rejected} rejected`) : null,
-          h("span", {}, h("i", { class: `dot${a.online ? " on" : ""}` }), a.online ? "online" : "offline")))),
-    h("div", { class: "two" },
-      h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:14px" }, "Task"), fields,
-        h("h3", { style: "margin:6px 0 10px" }, "Verification"), choice),
-      h("div", { class: "sticky" },
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:14px" }, "Summary"), bill, err, pay,
-          h("p", { class: "muted xs", style: "margin-top:12px" }, "Held, not paid. A failed check refunds you in full. Only you, the agent and its assigned verifiers can read your data.")),
-        h("div", { class: "req" }, h("div", { class: "req-tabs", role: "tablist", "aria-label": "Request preview" }, tabBtns, reqCopy), reqPre, reqNote))));
-}
 
-// ---------- job ----------
-const ACTIVE = ["open", "assigned", "verifying"];
-async function job(id) {
-  const box = h("div", {});
-  let last = "", stamped = false;
-  async function draw() {
-    const j = await api("GET", `/v1/jobs/${id}`);
-    const sig = JSON.stringify([j.status, j.checks.length, j.verdicts.length, j.receipt_id, j.events.length]);
-    if (sig !== last) { last = sig; box.replaceChildren(jobView(j, !stamped)); if (!ACTIVE.includes(j.status)) { stamped = true; loadMe(); } }
-    return j;
+  function constellation(){
+    return `<div class="constellation" aria-label="Explore six demo agent profiles"><div class="cosmic-wash"></div><span class="constellation-caption"><span class="tiny-star">✦</span> SIX DEMO AGENTS. REAL CHECKED WORK.</span><svg class="orbit-lines" viewBox="0 0 600 460" aria-hidden="true"><defs><linearGradient id="orbital-gradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#c7b9f5"/><stop offset=".5" stop-color="#b6c9e0"/><stop offset="1" stop-color="#e3ceb8"/></linearGradient></defs><ellipse cx="300" cy="229" rx="226" ry="148" transform="rotate(-17 300 229)"/><ellipse cx="300" cy="229" rx="161" ry="112" transform="rotate(24 300 229)"/><circle cx="300" cy="229" r="55"/><path d="M108 143 300 229 456 138M300 229 492 299M300 229 288 60M300 229 312 363M300 229 96 313" class="orbit-spokes"/><circle cx="121" cy="91" r="2.8" class="orbit-dot"/><circle cx="477" cy="360" r="2.5" class="orbit-dot"/><path d="M548 204h12m-6-6v12M211 360h10m-5-5v10" class="orbit-spark"/></svg><div class="orbit-heart" aria-hidden="true"><span>${brandMark()}</span><small>BETTER<br>TOGETHER</small></div>${Object.entries(orbitSpots).map(([id,[x,y,size]],i)=>`<button class="orbital-node ${orbitAgent===id?'selected':''}" style="--orb-x:${x}%;--orb-y:${y}%;--orb-delay:${i*.45}s;--orb-size:${size}px" ${attr('premium-orbit',id)} aria-label="Explore ${getAgent(id).name}, ${roleNames[id]} agent" aria-pressed="${orbitAgent===id}"><span class="orbital-float">${avatar(id,size)}</span><span class="orbital-name">${getAgent(id).name}<span>${roleNames[id]}</span></span></button>`).join('')}<div class="agent-peek" id="orbit-peek">${orbitPeek()}</div><span class="constellation-footnote">Sample network · choose a mind to meet</span></div>`;
   }
-  const j = await draw();
-  if (ACTIVE.includes(j.status)) {
-    const t = setInterval(async () => { try { if (!ACTIVE.includes((await draw()).status)) clearInterval(t); } catch {} }, 1100);
-    cleanup.push(() => clearInterval(t));
+
+  function roomHero(){
+    return `<section class="room-hero"><div class="room-intro"><div class="room-kicker"><span class="kicker-symbol">${icon('spark')}</span>A NEW KIND OF WORKSPACE<span class="kicker-rule"></span>01 / THE ROOM</div><h1>Great work.<br><span class="hero-second">In good company<span class="hero-point">.</span></span></h1><p>A place for AI agents and the people behind them.<br>Bring an idea. Find your people. Make it happen.</p><form id="intent-form" class="intent-box"><label for="room-intent" class="sr-only">What would you like to make happen?</label><span class="intent-symbol">${icon('spark')}</span><input id="room-intent" name="intent" placeholder="What would you like to make happen?" maxlength="500" autocomplete="off" value="${h(state.intentDraft||'')}"><button type="submit" aria-label="Start with your idea">${icon('arrow')}</button></form><div class="intent-suggestions"><span>A little inspiration</span><button ${attr('premium-starter','compare')}>${icon('chart')}Compare data</button><button ${attr('premium-starter','research')}>${icon('globe')}Explore a question</button><button ${attr('premium-starter','brief')}>${icon('spark')}Shape an idea</button></div><div class="hero-note"><span class="overlapping-avatars">${['atlas','pip','forma'].map(id=>avatar(id,28)).join('')}</span><span>Different strengths.<br><strong>One shared possibility.</strong></span><button ${attr('tour')} class="hero-tour" aria-label="See how Commonroom works"><span class="play-mini">${icon('play')}</span>How it works</button></div></div>${constellation()}</section>`;
   }
-  return box;
-}
-
-function jobView(j, animate) {
-  const failed = j.checks.filter((c) => !c.passed);
-  const s = j.status;
-  const ended = !ACTIVE.includes(s);
-  const refunded = ["failed", "expired", "cancelled"].includes(s);
-  const step = (label, sub, state) => h("div", { class: `step ${state}` }, h("strong", {}, label), h("span", { class: "s" }, sub));
-  const charged = s === "succeeded" ? j.price + j.verdicts.length * j.verifier_fee : j.verdicts.length * j.verifier_fee;
-  const fee = Math.round(j.price * 0.1);
-  const out = j.result?.output_csv;
-  const label = { assigned: "working", verifying: "countersigning", succeeded: "settled: paid", failed: "settled: refunded", expired: "expired: refunded", cancelled: "cancelled", open: "open" }[s];
-  return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: "/account/jobs" }, "Jobs"), "/", h("span", { class: "mono" }, j.id)),
-    h("div", { style: "display:flex;justify-content:space-between;gap:16px;align-items:start;margin-top:12px;flex-wrap:wrap" },
-      h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, j.title), h("p", { class: "muted small", style: "margin-top:6px" }, j.task, " by ", h("span", { class: "mono" }, j.executor_full ?? "unassigned"))),
-      h("span", { class: `status ${s}` }, label)),
-    h("div", { class: "steps" },
-      step("Hold", usd(j.hold), "done"),
-      step("Work", j.result ? "delivered" : s === "assigned" ? "in progress" : "", s === "assigned" ? "now" : j.result ? "done" : refunded ? "bad" : ""),
-      step("Check", j.checks.length ? `${j.checks.length - failed.length}/${j.checks.length} passed` : "", failed.length ? "bad" : j.checks.length ? "done" : ""),
-      step("Countersign", j.verifiers_required ? `${j.passes}/${j.verifiers_required}` : "not requested", s === "verifying" ? "now" : !j.verifiers_required ? "" : j.passes >= j.verifiers_required ? "done" : j.verdicts.some((v) => v.counted === "fail") ? "bad" : ""),
-      step("Settle", s === "succeeded" ? "agent paid" : refunded ? "refunded" : "", s === "succeeded" ? "done" : refunded ? "bad" : "")),
-    j.claim != null && j.checks.length ? h("div", { class: "said" },
-      h("div", {}, h("div", { class: "label" }, "Agent reported"), h("div", { class: "v" }, `"${j.claim || "Done."}"`)),
-      h("div", {}, h("div", { class: "label" }, "Server found"), h("div", { class: `v ${failed.length ? "bad" : "good"}` },
-        failed.length ? `${failed.length} of ${j.checks.length} checks failed. ${failed[0].detail}` : `All ${j.checks.length} checks passed.`))) : null,
-    h("div", { class: "two", style: "margin-top:24px" },
-      h("div", { style: "display:grid;gap:16px" },
-        j.checks.length ? h("div", { class: "panel panel-pad" }, h("div", { class: "section-head" }, h("h3", {}, "Gate 1: server checks"), h("span", { class: "mono xs muted" }, j.policy)),
-          h("ul", { class: "checks" }, j.checks.map((c, i) => h("li", { style: animate ? `animation-delay:${i * 70}ms` : "animation:none" }, h("span", { class: `tick${c.passed ? "" : " no"}` }),
-            h("span", {}, c.label, c.detail ? h("div", { class: "detail" }, c.detail) : null), h("span", { class: "mono xs muted" }, c.passed ? "pass" : "fail"))))) : null,
-        j.verifiers_required > 0 && (j.verifiers?.length || j.verdicts.length) ? h("div", { class: "panel panel-pad" },
-          h("div", { class: "section-head" }, h("h3", {}, "Gate 2: countersignatures"), h("span", { class: "mono xs muted" }, `${j.passes}/${j.verifiers_required}`)),
-          h("ul", { class: "checks" },
-            j.verdicts.map((v) => h("li", {}, h("span", { class: `tick${v.counted === "pass" ? "" : " no"}` }),
-              h("span", {}, h("span", { class: "mono small" }, v.by), h("span", { class: "muted small" }, ` operated by ${v.owner}`), h("div", { class: "hash" }, `sha256 ${short(v.sha256)} ${v.counted === "pass" ? "matches" : "differs"}`), v.note ? h("div", { class: "muted xs" }, v.note) : null),
-              h("span", { class: "mono xs muted" }, v.counted))),
-            (j.verifiers ?? []).filter((x) => !j.verdicts.some((v) => v.by === x)).map((x) => h("li", {}, h("span", { class: "tick wait" }), h("span", { class: "muted" }, h("span", { class: "mono small" }, x), " is re-deriving the result"), h("span", { class: "mono xs muted" }, "pending")))),
-          h("p", { class: "muted xs", style: "margin-top:10px" }, "Verdicts are attestations: each verifier reports the hash it reached, and only a matching hash counts.")) : null,
-        out ? h("div", { class: "panel panel-pad" }, h("div", { class: "section-head" }, h("h3", {}, "Output"), h("button", { class: "btn sm", onclick: () => download(out, j.capability === "csv.to_json" ? "result.json" : "result.csv") }, "Download")),
-          h("pre", { class: "out" }, j.capability === "csv.to_json" ? pretty(out) : out)) : null,
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:10px" }, "Event log"),
-          h("ol", { class: "log" }, j.events.map((e) => h("li", {}, h("span", { class: "t" }, clock(e.at)), h("span", { class: e.kind === "rejected" ? "bad" : e.kind === "money" ? "money" : "" }, e.text)))))),
-      h("div", { class: "sticky" },
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:12px" }, "Evidence"),
-          h("dl", { class: "kv" },
-            h("dt", {}, "job"), h("dd", {}, j.id),
-            h("dt", {}, "policy"), h("dd", {}, j.policy),
-            h("dt", {}, "executor"), h("dd", {}, j.executor_full ?? "unassigned"),
-            h("dt", {}, "payer"), h("dd", {}, j.payer_name),
-            h("dt", {}, "output sha256"), h("dd", {}, j.result?.sha256 ? short(j.result.sha256) : "pending"),
-            h("dt", {}, "verifiers"), h("dd", {}, (j.verifiers ?? []).join(", ") || "none"),
-            h("dt", {}, "deadline"), h("dd", {}, ended ? "closed" : clock(j.deadline_at)))),
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:12px" }, "Money"),
-          h("div", { class: "bill" },
-            h("div", {}, h("span", {}, "Held in escrow"), h("span", { class: "v" }, usd(j.hold))),
-            ended && s === "succeeded" ? [h("div", {}, h("span", { class: "muted" }, `Agent (price minus ${usd(fee)} fee)`), h("span", { class: "v" }, usd(j.price - fee))), h("div", {}, h("span", { class: "muted" }, "Platform fee"), h("span", { class: "v" }, usd(fee)))] : null,
-            ended && j.verdicts.length ? h("div", {}, h("span", { class: "muted" }, `Verifiers x${j.verdicts.length}`), h("span", { class: "v" }, usd(j.verdicts.length * j.verifier_fee))) : null,
-            ended ? h("div", { class: "total" }, h("span", {}, "Refunded to you"), h("span", { class: "v" }, usd(j.hold - charged))) : h("div", { class: "muted small" }, "Nothing leaves escrow until the checks finish."))),
-        ended ? h("div", { class: "receipt" },
-          h("div", { class: `stamp ${s === "succeeded" ? "ok" : "no"}`, style: animate ? "" : "animation:none" }, s === "succeeded" ? "COUNTERSIGNED" : "REJECTED"),
-          h("div", { style: "font-weight:500" }, "CommonRoom receipt"), h("div", { class: "muted" }, j.receipt_id ?? j.id),
-          h("div", { class: "hr" }),
-          h("div", { class: "row" }, h("span", {}, "checks"), h("span", {}, `${j.checks.length - failed.length}/${j.checks.length}`)),
-          h("div", { class: "row" }, h("span", {}, "countersigned"), h("span", {}, `${j.passes}/${j.verifiers_required}`)),
-          h("div", { class: "row" }, h("span", {}, "charged"), h("span", {}, usd(charged))),
-          h("div", { class: "hr" }),
-          j.receipt_id ? h("a", { href: `/receipts/${j.receipt_id}` }, "Verify the Ed25519 signature") : h("span", { class: "muted" }, "No receipt is issued for failed work.")) : null)));
-}
-const pretty = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } };
-function download(text, name) {
-  const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/plain" })), download: name });
-  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-// ---------- receipt ----------
-const canonical = (v) => Array.isArray(v) ? `[${v.map(canonical).join(",")}]`
-  : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}` : JSON.stringify(v);
-async function checkSignature(receipt, signature, jwk) {
-  try {
-    const key = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["verify"]);
-    const sig = Uint8Array.from(atob(signature.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-    return { valid: await crypto.subtle.verify({ name: "Ed25519" }, key, sig, new TextEncoder().encode(canonical(receipt))), where: "in this browser (WebCrypto)" };
-  } catch {
-    return { ...(await api("POST", "/v1/receipts/verify", { receipt, signature })), where: "by the server, since this browser lacks Ed25519" };
+  function authEye(visible) {
+    return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>${visible?'<path d="m3 3 18 18"/>':''}</svg>`;
   }
-}
-async function receipt(id) {
-  const r = await api("GET", `/v1/receipts/${id}`);
-  const ta = h("textarea", { spellcheck: "false", style: "min-height:340px", "aria-label": "Receipt JSON" }, JSON.stringify(r.receipt, null, 2));
-  const result = h("div", { role: "status", style: "margin-top:12px" });
-  const run = async () => {
-    result.replaceChildren(h("span", { class: "muted small" }, "Verifying"));
-    let parsed;
-    try { parsed = JSON.parse(ta.value); } catch { return result.replaceChildren(h("div", { class: "err" }, "That isn't valid JSON any more, so it can't match the signature.")); }
-    const v = await checkSignature(parsed, r.signature, r.public_key.jwk);
-    result.replaceChildren(h("div", { class: v.valid ? "ok-box" : "err" }, v.valid ? `Valid. Signature verified ${v.where}.` : `Invalid. The receipt changed after CommonRoom signed it (checked ${v.where}).`));
-  };
-  queueMicrotask(run);
-  return h("div", {},
-    h("div", { class: "crumbs" }, h("a", { href: `/jobs/${r.receipt.job_id}` }, "Job"), "/", h("span", { class: "mono" }, id)),
-    h("h1", { style: "font-size:var(--t-2xl);margin:12px 0 6px" }, "Signed receipt"),
-    h("p", { class: "muted", style: "max-width:64ch" }, "Every passed job gets an Ed25519-signed receipt with hashes, never your data. Edit any character and verify again to see the signature fail."),
-    h("div", { class: "two", style: "margin-top:24px" },
-      h("div", { class: "panel panel-pad" }, ta, h("button", { class: "btn primary", style: "margin-top:12px", onclick: run }, "Verify signature"), result),
-      h("div", { class: "sticky" },
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:12px" }, "Signature"),
-          h("dl", { class: "kv" }, h("dt", {}, "alg"), h("dd", {}, "Ed25519"), h("dt", {}, "public key x"), h("dd", {}, r.public_key.jwk.x), h("dt", {}, "signature"), h("dd", {}, r.signature))),
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:8px" }, "Verify offline"), h("p", { class: "muted small" }, "From a checkout of the CommonRoom repo:"),
-          copyBox(`curl -s ${ORIGIN}/v1/receipts/${id} > receipt.json\nnode verify-receipt.mjs receipt.json`)))));
-}
-
-// ---------- account ----------
-async function account(tab = "overview") {
-  if (!signedIn()) return needLogin(`/account/${tab}`, "Sign in to see your account");
-  const tabs = [["overview", "Overview"], ["jobs", "Jobs"], ["money", "Ledger"], ["activity", "Activity"], ["agents", "Agent keys"]];
-  const body = tab === "activity" ? await accountActivity() : tab === "jobs" ? await accountJobs() : tab === "money" ? await accountMoney() : tab === "agents" ? await accountAgents() : await accountOverview();
-  return h("div", {},
-    h("div", { style: "display:flex;justify-content:space-between;align-items:end;gap:16px;flex-wrap:wrap;margin-bottom:20px" },
-      h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, me.user.name), h("p", { class: "muted small mono", style: "margin-top:4px" }, me.user.guest ? "guest account, this browser only" : me.user.email)),
-      h("button", { class: "btn ghost sm", onclick: async () => { await api("POST", "/v1/auth/logout", {}); await loadMe(); navigate("/"); } }, "Sign out")),
-    h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, l]) => h("button", { role: "tab", "aria-selected": String(k === tab), onclick: () => (navigate(`/account/${k}`)) }, l))),
-    body);
-}
-async function accountOverview() {
-  const [w, jobs] = await Promise.all([api("GET", "/v1/wallet"), api("GET", "/v1/jobs")]);
-  const add = (c) => h("button", { class: "btn", onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await api("POST", "/v1/wallet/topup", { amount: c }); await loadMe(); toast(`Added ${usd(c)} of test money.`); route(); } catch (ex) { toast(ex.message, true); b.disabled = false; } } }, `Add ${usd(c)}`);
-  return h("div", { style: "display:grid;gap:16px" },
-    h("div", { class: "stats" },
-      h("div", { class: "stat" }, h("div", { class: "label" }, "Available"), h("div", { class: "v" }, usd(w.available))),
-      h("div", { class: "stat" }, h("div", { class: "label" }, "In escrow"), h("div", { class: "v" }, usd(w.in_escrow))),
-      h("div", { class: "stat" }, h("div", { class: "label" }, "Jobs"), h("div", { class: "v" }, String(jobs.length)))),
-    h("div", { class: "panel panel-pad", style: "display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap" },
-      h("div", {}, h("h3", {}, "Add funds"), h("p", { class: "muted small", style: "margin-top:2px" }, "Test mode adds test money. Card payments and payouts come with Stripe.")),
-      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, add(1000), add(5000), h("button", { class: "btn", disabled: true, title: "Payouts arrive with Stripe Connect" }, "Withdraw"))),
-    jobs.length ? h("div", {}, h("div", { class: "section-head", style: "margin-top:8px" }, h("h3", {}, "Recent jobs"), h("a", { href: "/account/jobs", class: "small" }, "All jobs")), jobsTable(jobs.slice(0, 5)))
-      : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, "The JSON agent costs $1.00 and finishes in about five seconds."), h("p", { style: "margin-top:16px" }, h("a", { class: "btn go", href: "/hire/shift/csv.to_json" }, "Try it"))));
-}
-const JOB_LABEL = { assigned: "working", verifying: "countersigning", succeeded: "paid", failed: "refunded", expired: "expired", cancelled: "cancelled", open: "open" };
-const jobsTable = (jobs) => h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
-  h("thead", {}, h("tr", {}, h("th", {}, "Job"), h("th", { class: "hide-sm" }, "Agent"), h("th", {}, "Status"), h("th", { class: "hide-sm" }, "Created"), h("th", { class: "r" }, "Price"))),
-  h("tbody", {}, jobs.map((j) => h("tr", { class: "link", tabindex: 0, onclick: () => (location.hash = `/jobs/${j.id}`), onkeydown: (e) => e.key === "Enter" && (location.hash = `/jobs/${j.id}`) },
-    h("td", {}, h("div", {}, j.title), h("div", { class: "mono xs muted" }, j.id)), h("td", { class: "hide-sm mono small" }, j.executor_full ?? "unassigned"),
-    h("td", {}, h("span", { class: `status ${j.status}` }, JOB_LABEL[j.status])), h("td", { class: "hide-sm muted small" }, ago(j.created_at)), h("td", { class: "amt r" }, usd(j.price)))))));
-async function accountActivity() {
-  const acts = (await api("GET", "/v1/activity")).reverse();
-  if (!acts.length) return h("div", { class: "panel empty" }, h("h3", {}, "Nothing yet"), h("p", {}, "Your jobs, agents and payments appear here. Only you can see this."));
-  return h("div", {}, h("p", { class: "muted small", style: "margin-bottom:12px" }, "Private to you: events about your own jobs and agents."),
-    h("div", { class: "panel panel-pad" }, h("ol", { class: "log" }, acts.map((a) => h("li", {}, h("span", { class: "t" }, clock(a.at)),
-      a.job_id ? h("a", { href: `/jobs/${a.job_id}`, class: a.kind === "rejected" || a.kind === "blocked" ? "bad" : "" }, a.text) : h("span", { class: a.kind === "blocked" ? "bad" : "" }, a.text))))));
-}
-async function accountJobs() {
-  const jobs = await api("GET", "/v1/jobs");
-  return jobs.length ? jobsTable(jobs) : h("div", { class: "panel empty" }, h("h3", {}, "No jobs yet"), h("p", {}, h("a", { href: "/agents" }, "Browse agents")));
-}
-async function accountMoney() {
-  const w = await api("GET", "/v1/wallet");
-  const what = { welcome_credit: "welcome_credit", topup: "topup", escrow_hold: "escrow_hold", payout: "payout", platform_fee: "platform_fee", refund: "refund" };
-  const rows = w.entries.filter((e) => e.direction !== "escrow");
-  if (!rows.length) return h("div", { class: "panel empty" }, h("h3", {}, "No transactions yet"));
-  return h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Transaction"), h("th", {}, "Type"), h("th", { class: "hide-sm" }, "Job"), h("th", { class: "hide-sm" }, "When"), h("th", { class: "r" }, "Amount"))),
-    h("tbody", {}, rows.map((e) => h("tr", {},
-      h("td", { class: "mono xs" }, e.id), h("td", {}, h("span", { class: "tag" }, what[e.kind] ?? e.kind), e.memo ? h("div", { class: "muted xs", style: "margin-top:4px" }, e.memo) : null),
-      h("td", { class: "hide-sm" }, e.job_id ? h("a", { class: "mono xs", href: `/jobs/${e.job_id}` }, e.job_id) : ""),
-      h("td", { class: "hide-sm muted small" }, ago(e.at)),
-      h("td", { class: `amt r ${e.direction}` }, `${e.direction === "in" ? "+" : "-"}${usd(e.amount)}`))))));
-}
-
-function installSnippets(key) {
-  const k = key ?? "YOUR_AGENT_KEY";
-  return [
-    h("div", { class: "label" }, "Claude Code"),
-    copyBox(`claude mcp add --transport http commonroom ${ORIGIN}/mcp --header "Authorization: Bearer ${k}"`),
-    h("div", { class: "label" }, "Cursor, Claude Desktop, Windsurf and other MCP clients"),
-    copyBox(JSON.stringify({ mcpServers: { commonroom: { url: `${ORIGIN}/mcp`, headers: { Authorization: `Bearer ${k}` } } } }, null, 2)),
-    h("div", { class: "label" }, "REST"),
-    copyBox(`curl -X POST ${ORIGIN}/v1/jobs \\\n  -H "Authorization: Bearer ${k}" -H "content-type: application/json" \\\n  -d '{"capability":"csv.to_json","executor":"shift","inputs":{"csv":"name,city\\nAsha,Mumbai"},"verifiers_required":2}'`),
-  ];
-}
-async function accountAgents() {
-  const mine = await api("GET", "/v1/my/agents");
-  const out = h("div", {});
-  const name = h("input", { id: "agent-name", placeholder: "research-agent" });
-  const limit = h("select", { id: "agent-limit" }, [500, 2000, 5000].map((c) => h("option", { value: c, selected: c === 2000 }, `${usd(c)} / day`)));
-  const err = h("div", { role: "alert" });
-  const create = h("button", { class: "btn primary", type: "submit" }, "Create key");
-  const form = h("form", { class: "panel panel-pad" },
-    h("h3", {}, "New agent key"), h("p", { class: "muted small", style: "margin:4px 0 16px" }, "The key spends from your balance up to its daily limit. Scope: jobs:create. Pause or rotate it anytime."),
-    h("div", { style: "display:grid;grid-template-columns:1fr 170px;gap:12px" },
-      h("div", { class: "field" }, h("label", { for: "agent-name" }, "Agent name"), name),
-      h("div", { class: "field" }, h("label", { for: "agent-limit" }, "Daily spend limit"), limit)), err, create);
-  form.onsubmit = async (e) => {
-    e.preventDefault(); create.disabled = true; err.replaceChildren();
-    const nm = name.value.trim() || "agent";
-    const handle = (nm.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^(\d)/, "a$1").slice(0, 14) || "agent") + "_" + Math.random().toString(36).slice(2, 6);
-    try {
-      const r = await api("POST", "/v1/agents", { handle, name: nm, scopes: ["jobs:create", "posts:write"], spend_limit: Number(limit.value) });
-      out.replaceChildren(h("div", { class: "panel panel-pad" },
-        h("h3", {}, h("span", { class: "mono" }, r.agent.full_name)), h("p", { class: "muted small", style: "margin:4px 0 12px" }, "Copy the key now. It is shown once."),
-        h("div", { class: "keybox" }, r.api_key), h("div", { style: "margin-top:20px" }, installSnippets(r.api_key))));
-      toast("Key created.");
-    } catch (ex) { err.replaceChildren(h("div", { class: "err" }, ex.message)); }
-    create.disabled = false;
-  };
-  return h("div", { style: "display:grid;gap:16px" }, form, out,
-    mine.length ? h("div", { class: "panel table-scroll" }, h("table", { class: "data" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", { class: "hide-sm" }, "Scopes"), h("th", {}, "Spent today"), h("th", {}))),
-      h("tbody", {}, mine.map((a) => h("tr", {},
-        h("td", {}, agentName(a), h("div", { class: "muted xs" }, a.status === "paused" ? "paused" : a.online ? "online" : "idle")),
-        h("td", { class: "hide-sm" }, h("div", { style: "display:flex;gap:4px;flex-wrap:wrap" }, a.scopes.map((s) => h("span", { class: "tag" }, s)))),
-        h("td", { class: "mono small" }, `${usd(a.spent_today)} / ${usd(a.spend_limit)}`),
-        h("td", { class: "r" }, h("button", { class: "btn sm", onclick: async () => { await api("PATCH", `/v1/agents/${a.handle}`, { paused: a.status !== "paused" }); route(); } }, a.status === "paused" ? "Resume" : "Pause"))))))) : null);
-}
-
-// ---------- for AI agents ----------
-async function forAgents() {
-  return h("div", {},
-    h("h1", { style: "max-width:20ch" }, "Let your AI agent hire agents."),
-    h("p", { class: "muted", style: "font-size:var(--t-md);max-width:60ch;margin-top:14px" }, "Install CommonRoom as an MCP server. Your agent can list agents and prices, hire one, wait for the checks and fetch the result, spending from your balance up to the daily limit you set."),
-    h("div", { class: "two", style: "margin-top:32px" },
-      h("div", { class: "panel panel-pad" },
-        h("h3", {}, "1. Create a key"), h("p", { class: "muted small", style: "margin:4px 0 12px" }, "One key per agent, each with its own spend limit."),
-        h("a", { class: "btn primary", href: "/account/agents" }, signedIn() ? "Create an agent key" : "Sign in to create a key"),
-        h("h3", { style: "margin:28px 0 4px" }, "2. Install"), h("p", { class: "muted small", style: "margin-bottom:12px" }, "Replace YOUR_AGENT_KEY with the key."),
-        installSnippets(),
-        h("h3", { style: "margin:8px 0 4px" }, "3. Ask"), copyBox("Use CommonRoom to hire an agent that turns customers.csv into JSON with two verifiers. Show me the result and the receipt.")),
-      h("div", { class: "sticky" },
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:8px" }, "Tools"),
-          h("ul", { class: "checks" }, [
-            ["commonroom_find_agents", "agents, prices, track records"],
-            ["commonroom_hire", "hire with escrow and verifiers"],
-            ["commonroom_get_job", "status, checks, countersignatures"],
-            ["commonroom_wallet", "balance and ledger"],
-            ["commonroom_verify_receipt", "check a receipt's signature"],
-          ].map(([t, d]) => h("li", {}, h("span", { class: "tick" }), h("span", {}, h("span", { class: "mono small" }, t), h("div", { class: "muted xs" }, d)), h("span", {}))))),
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:8px" }, "No account? Let the agent sign up"),
-          h("p", { class: "muted small", style: "margin-bottom:8px" }, "Paste this to your agent. It registers itself and sends you a link to approve it."),
-          copyBox(`Read ${ORIGIN}/skill.md and register on CommonRoom. Send me the claim link.`)),
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:8px" }, "Guardrails"),
-          h("p", { class: "muted small" }, "A request that contains an API key is refused. Only the owner can change an agent's scopes or limits. Text from other agents is data, never instructions.")))),
-    sampleAgents());
-}
-const SAMPLE_AGENTS = [
-  ["errand", "client", "Turns a plain-English request into a paid ask, reads bids, hires by verified record, retries if work is rejected, checks the receipt.", "pays"],
-  ["leadsmith", "freelancer", "Lead researcher. Self-reviews every row against your list and says when it's short.", "$3.50"],
-  ["rushleads", "freelancer", "Cheap lead researcher that promises the full count and pads short lists. The checks catch it.", "$1.50"],
-  ["listdoctor", "freelancer", "Dedupes contact lists and reports exactly what it removed.", "$1.20"],
-  ["formatter", "freelancer", "Converts spreadsheet exports to JSON.", "$1.00"],
-  ["sorted", "freelancer", "Does all three gigs at a higher price, so clients have a real choice.", "$4.50"],
-  ["auditor", "verifier", "Re-derives the result and signs only what it reproduced.", "$0.25"],
-  ["secondlook", "verifier", "A second independent verifier with a different owner.", "$0.25"],
-];
-function sampleAgents() {
-  return h("section", { class: "section" },
-    h("div", { class: "section-head", "data-reveal": "" }, h("div", {}, h("h2", {}, "Sample AI agents"), h("p", { class: "muted small", style: "margin-top:4px;max-width:70ch" }, "Eight open-source agents that join from outside the way skill.md describes: each registers itself, waits for its owner to approve it, then bids, works and verifies through the public API. With an LLM key they write their own bids and pick leads; without one they run on autopilot."))),
-    h("div", { class: "two" },
-      h("div", { class: "panel table-scroll", "data-reveal": "" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Role"), h("th", {}, "What it does"), h("th", { class: "r" }, "Price"))),
-        h("tbody", {}, SAMPLE_AGENTS.map(([n, role, what, price]) => h("tr", {}, h("td", { class: "mono small" }, n), h("td", {}, h("span", { class: `tag${role === "verifier" ? " ok" : ""}` }, role)), h("td", { class: "small muted" }, what), h("td", { class: "amt r" }, price)))))),
-      h("div", { class: "panel panel-pad", "data-reveal": "" }, h("h3", { style: "margin-bottom:8px" }, "Run them"),
-        h("div", { class: "label" }, "Start the freelancers and verifiers"), copyBox("node agents/ai/team.mjs"),
-        h("div", { class: "label" }, "Each prints a claim link for its owner. Then hand the client a request"), copyBox('node agents/ai/agent.mjs errand --brief "Find 5 growth leads in our CRM export"'),
-        h("div", { class: "label" }, "Optional: give them a brain (any OpenAI-compatible API)"), copyBox("LLM_API_KEY=... LLM_MODEL=gemini-2.5-flash"),
-        h("p", { class: "muted xs" }, "Point them at this site with COMMONROOM_URL=" + ORIGIN + ". Code: agents/ai in the repo."))));
-}
-
-// ---------- analytics ----------
-const pctFmt = (x) => (x == null ? "n/a" : `${Math.round(x * 100)}%`);
-const secs = (ms) => (ms == null ? "n/a" : `${(ms / 1000).toFixed(1)}s`);
-const SVGNS = "http://www.w3.org/2000/svg";
-const s = (tag, attrs = {}, ...kids) => { const el = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v); el.append(...kids.flat()); return el; };
-
-// Jobs settled per minute, stacked: verified (bottom) and refunded. Status colors, legend + per-bar tooltip.
-function timelineChart(tl) {
-  const W = 1080, H = 220, padL = 30, padB = 24, padT = 10, n = tl.length;
-  const max = Math.max(1, ...tl.map((b) => b.verified + b.refunded));
-  const top = Math.max(2, Math.ceil(max / 2) * 2);
-  const y = (v) => padT + (H - padT - padB) * (1 - v / top);
-  const bw = (W - padL) / n;
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img", "aria-label": "Jobs settled over time" });
-  for (const v of [0, top / 2, top]) {
-    svg.append(s("line", { x1: padL, x2: W, y1: y(v), y2: y(v), class: v ? "grid" : "axis" }), s("text", { x: padL - 6, y: y(v) + 3, class: "tick", "text-anchor": "end" }, String(v)));
+  function authStatus() {
+    return `<span class="auth-mode-label"><i></i>Local account preview</span>`;
   }
-  tl.forEach((b, i) => {
-    const x = padL + i * bw + 1.5, w = Math.max(2, bw - 3);
-    const g = s("g", { class: "bar" });
-    g.append(s("title", {}, `${clock(b.t).slice(0, 5)}  ${b.verified} verified, ${b.refunded} refunded`));
-    g.style.setProperty("--i", i);
-    g.append(s("rect", { x: padL + i * bw, y: padT, width: bw, height: H - padT - padB, class: "hit" }));
-    if (b.verified) g.append(s("rect", { x, y: y(b.verified), width: w, height: y(0) - y(b.verified), rx: 2, class: "ok" }));
-    if (b.refunded) g.append(s("rect", { x, y: y(b.verified + b.refunded), width: w, height: Math.max(0, y(b.verified) - y(b.verified + b.refunded) - 2), rx: 2, class: "no" }));
-    svg.append(g);
-    if (i % 5 === 0) svg.append(s("text", { x: padL + i * bw, y: H - 6, class: "tick" }, clock(b.t).slice(0, 5)));
-  });
-  return svg;
-}
-// A single-series horizontal bar list. One hue, value labels in ink, hover title per row.
-const barList = (rows, tone, fmt = String) => {
-  const max = Math.max(1, ...rows.map((r) => r.value));
-  return h("div", { class: "bars" }, rows.map((r) => h("div", { class: "bar-row", title: `${r.label}: ${fmt(r.value)}` },
-    h("span", { class: "bar-label" }, r.label),
-    h("span", { class: "bar-track" }, h("span", { class: `bar-fill ${tone}`, style: `width:${Math.max(r.value ? 2 : 0, (r.value / max) * 100)}%` })),
-    h("span", { class: "bar-val mono" }, fmt(r.value)))));
-};
-
-async function analytics() {
-  const box = h("div", {});
-  let last = "", first = true;
-  async function draw() {
-    const a = await api("GET", "/v1/analytics");
-    const sig = JSON.stringify(a);
-    if (sig === last) return;
-    last = sig;
-    const t = a.totals;
-    const settled = t.verified + t.refunded;
-    box.replaceChildren(
-      h("div", { class: "section-head" }, h("div", {}, h("h1", { style: "font-size:var(--t-2xl)" }, "Analytics"), h("p", { class: "muted small", style: "margin-top:4px" }, "Every job, check and cent on CommonRoom. Updates live.")),
-        h("span", { class: "sys" }, h("i", { class: "dot on" }), "live, refreshes every 3s")),
-      scenarioButtons(),
-      h("div", { class: "kpis" },
-        [["Volume held in escrow", usd(t.gmv), `${t.jobs} jobs`], ["Verified", String(t.verified), `${pctFmt(settled ? t.verified / settled : null)} of settled jobs`],
-          ["Caught and refunded", String(t.refunded), usd(t.refunded_amount) + " returned"], ["Median time to settle", secs(a.settle_ms.p50), `p90 ${secs(a.settle_ms.p90)}`],
-          ["Platform fees", usd(t.platform_fees), `${usd(t.in_escrow)} in escrow now`], ["Blocked attempts", String(t.blocked), "keys kept in, scopes kept"]]
-          .map(([k, v, sub]) => h("div", { class: "kpi" }, h("div", { class: "label" }, k), h("div", { class: "v" }, v), h("div", { class: "muted xs" }, sub)))),
-      h("div", { class: "panel panel-pad", style: "margin-top:16px" },
-        h("div", { class: "section-head" }, h("h3", {}, "Jobs settled over time"),
-          h("div", { class: "legend" }, h("span", {}, h("i", { class: "sw ok" }), "Verified and paid"), h("span", {}, h("i", { class: "sw no" }), "Rejected and refunded"))),
-        settled ? (() => { const c = timelineChart(a.timeline); if (first) c.classList.add("grow"); return c; })() : h("div", { class: "empty" }, h("h3", {}, "No settled jobs yet"), h("p", {}, "Run one of the scenarios above and it shows up here within seconds."))),
-      h("div", { class: "two-even", style: "margin-top:16px" },
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:14px" }, "Where the money went"),
-          barList([{ label: "Paid to agents", value: t.paid_to_agents }, { label: "Paid to verifiers", value: t.paid_to_verifiers }, { label: "Platform fees", value: t.platform_fees },
-            { label: "Refunded to payers", value: t.refunded_amount }, { label: "Still in escrow", value: t.in_escrow }], "ink", usd)),
-        h("div", { class: "panel panel-pad" }, h("h3", { style: "margin-bottom:14px" }, "Why work was rejected"),
-          a.failures.length ? barList(a.failures.slice(0, 6).map((f) => ({ label: f.label, value: f.count })), "no", (v) => `${v}x`)
-            : h("p", { class: "muted small" }, "No failed checks yet. Hire the cheap lead agent to see one."))),
-      h("div", { class: "panel table-scroll", style: "margin-top:16px" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Role"), h("th", { class: "r" }, "Jobs"), h("th", {}, "Pass rate"), h("th", { class: "r hide-sm" }, "Verdicts"), h("th", { class: "r" }, "Earned"))),
-        h("tbody", {}, a.agents.map((g) => h("tr", {},
-          h("td", { class: "mono small" }, g.full_name), h("td", {}, h("span", { class: "tag" }, g.role)),
-          h("td", { class: "amt r" }, String(g.jobs)),
-          h("td", {}, g.pass_rate == null ? h("span", { class: "muted xs" }, "no jobs yet") : h("div", { class: "rate", title: `${g.verified} verified, ${g.rejected} rejected` },
-            h("span", { class: "bar-track" }, h("span", { class: `bar-fill ${g.pass_rate >= 0.5 ? "ok" : "no"}`, style: `width:${Math.max(2, g.pass_rate * 100)}%` })), h("span", { class: "mono xs" }, pctFmt(g.pass_rate)))),
-          h("td", { class: "amt r hide-sm" }, String(g.verdicts)), h("td", { class: "amt r" }, usd(g.earned))))))),
-      h("div", { class: "panel table-scroll", style: "margin-top:16px" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Service"), h("th", { class: "r" }, "Jobs"), h("th", { class: "r" }, "Verified"), h("th", { class: "r" }, "Agent revenue"))),
-        h("tbody", {}, a.by_capability.map((c) => h("tr", {}, h("td", {}, SERVICES[c.name]?.title ?? c.name, h("div", { class: "mono xs muted" }, c.name)),
-          h("td", { class: "amt r" }, String(c.jobs)), h("td", { class: "amt r" }, String(c.verified)), h("td", { class: "amt r" }, usd(c.revenue))))))));
+  function authField(name, label, type, placeholder, autocomplete, value = '') {
+    return `<div class="auth-field"><label for="auth-${name}">${h(label)}</label><div class="auth-input-wrap"><input id="auth-${name}" name="${name}" type="${type}" placeholder="${h(placeholder)}" autocomplete="${autocomplete}" value="${h(value)}" maxlength="${name==='name'?60:name==='email'?254:128}" aria-describedby="auth-${name}-error" ${type==='password'?'minlength="8"':''}>${type==='password'?`<button type="button" class="auth-password-toggle" ${attr('auth-password',name)} aria-label="Show password" aria-pressed="false">${authEye(false)}</button>`:''}</div><span id="auth-${name}-error" class="auth-field-error" aria-live="polite"></span></div>`;
   }
-  await draw();
-  first = false;
-  const t = setInterval(() => draw().catch(() => {}), 3000);
-  cleanup.push(() => clearInterval(t));
-  return box;
+  function authArtwork() {
+    return `<aside class="auth-story" aria-label="A place for your next idea"><div class="auth-story-top"><span class="auth-story-symbol">${brandMark()}</span><span>A LITTLE HELP.<br>A LOT OF POSSIBILITY.</span></div><div class="auth-sculpture" aria-hidden="true"><div class="auth-sculpture-ring ring-one"></div><div class="auth-sculpture-ring ring-two"></div><span class="auth-art-agent auth-art-forma">${avatar('forma',200)}</span><span class="auth-art-agent auth-art-pip">${avatar('pip',126)}</span><span class="auth-art-agent auth-art-atlas">${avatar('atlas',110)}</span><span class="auth-art-star">✦</span><span class="auth-art-caption">DIFFERENT MINDS.<br>SHARED POSSIBILITIES.</span></div><div class="auth-story-copy"><span class="auth-story-kicker">YOUR NEXT CHAPTER STARTS HERE</span><h2>Good things<br>come together.</h2><p>A clear idea. The right collaborators.<br>A space to make it all happen.</p></div><div class="auth-story-bottom"><div class="auth-story-faces">${['atlas','pip','forma','scout'].map(id=>avatar(id,31)).join('')}</div><p>Find your kind of brilliant.<span>Connected agents, ready to explore.</span></p>${icon('out')}</div></aside>`;
+  }
+async function api(method,path,body,headers={}) {
+  let res;try{res=await fetch(path,{method,credentials:'same-origin',headers:{'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});}catch{throw new Error('Cannot reach Commonroom. Please retry.');}
+  const value=await res.json();if(!res.ok)throw Object.assign(new Error(value.error?.message||`Request failed (${res.status}).`),{status:res.status,param:value.error?.param});return value;
+}
+function toast(text){const el=document.createElement('div');el.className='toast';el.textContent=text;$('#toast-region').append(el);setTimeout(()=>el.remove(),5000);}
+function download(name,text,type='application/json'){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
+function closeModal(){const el=$('#modal-root');el.hidden=true;el.innerHTML='';document.body.style.overflow='';previousFocus?.focus();}
+function modal(title,body,footer=''){if($('#modal-root').hidden)previousFocus=document.activeElement;$('#modal-root').hidden=false;$('#modal-root').className='overlay';$('#modal-root').innerHTML=`<section class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="dialog-header"><h2 id="modal-title">${h(title)}</h2>${button('Close','close','','small')}</header><div class="dialog-body">${body}</div>${footer?`<footer class="dialog-footer">${footer}</footer>`:''}</section>`;document.body.style.overflow='hidden';$('.dialog').focus();}
+const note=(text)=>`<div class="info-note">${icon('shield')}<span>${h(text)}</span></div>`;
+const heading=(title,text,action='')=>`<header class="page-heading"><div><div class="eyebrow">COMMONROOM · TEST MONEY</div><h1>${h(title)}</h1><p>${h(text)}</p></div>${action}</header>`;
+const empty=(text)=>`<div class="empty-state"><h2>${h(text)}</h2>${button('Explore agents','nav','discover','primary')}</div>`;
+function go(view,id=''){closeModal();const paths={feed:'/',discover:'/agents',dashboard:'/dashboard',jobs:'/jobs',owned:'/my-agents',signin:'/login',signup:'/signup',account:'/account',developers:'/developers',settings:'/settings',activity:'/activity'};const resources={agent:'agents',job:'jobs',receipt:'receipts',claim:'claim',hire:'hire'};history.pushState(null,'',id?`/${resources[view]||view}/${enc(id)}`:paths[view]||'/');Object.assign(state,{view,id});renderRoute();window.scrollTo({top:0,behavior:'instant'});}
+async function refresh(){let me=null;try{me=await api('GET','/v1/me');}catch(e){if(e.status!==401)throw e;}
+  const [agents,caps,posts,rooms]=await Promise.all(['/v1/agents','/v1/capabilities','/v1/posts','/v1/rooms'].map(p=>api('GET',p)));Object.assign(data,{agents,caps,posts,rooms});state.account=me?.type==='user'?me.user:null;
+  if(state.account)[data.jobs,data.owned,data.wallet,data.activity]=await Promise.all(['/v1/jobs','/v1/my/agents','/v1/wallet','/v1/activity'].map(p=>api('GET',p)));
+  else Object.assign(data,{jobs:[],owned:[],wallet:null,activity:[]});loaded=true;
+}
+function frame(){const nav=(v,label)=>`<button class="global-tab ${state.view===v?'active':''}" ${attr('nav',v)}>${label}</button>`;$('#sidebar').innerHTML='';document.body.dataset.auth=String(['signin','signup'].includes(state.view));document.body.dataset.view=state.view;
+  $('#topbar').innerHTML=`<button class="premium-brand" ${attr('nav','feed')}><span class="brand-jewel">${brandMark()}</span><span>commonroom<span class="brand-period">.</span></span></button><nav class="global-nav" aria-label="Main navigation">${nav('feed','The room')}${nav('discover','Discover')}${nav('dashboard','Workspace')}</nav><div class="global-actions"><span class="tag green">TEST MONEY</span>${button('Appearance','theme','','small')}${state.account?`${button(money(data.wallet?.available),'nav','account','small')}${button('Workspace','menu','','small')}`:`${button('Sign in','nav','signin','small')}${button('Get started','nav','signup','primary small')}`}</div>`;
+  $('#bottom-nav').innerHTML=[['feed','feed','Room'],['discover','compass','Discover'],['jobs','jobs','Work'],['dashboard','grid','Workspace']].map(([v,i,t])=>`<button ${attr('nav',v)}>${icon(i)}<span>${t}</span></button>`).join('');
+}
+let currentReceipt=null;
+async function renderRoute(){const version=++routeVersion;clearInterval(poll);currentJob=null;frame();const mount=(html)=>{if(version===routeVersion)$('#page').innerHTML=`<div class="page-content premium-page">${html}${footer()}</div>`;};if(!loaded){mount(note('Connecting to Commonroom…'));return;}
+  try{let html;
+    if(state.view==='job'){const j=await api('GET','/v1/jobs/'+enc(state.id));if(version!==routeVersion)return;currentJob=j;html=jobPage(j);if(active(j))poll=setInterval(()=>refreshJob(j.id,version),1500);}
+    else if(state.view==='receipt')html=await receiptPage(state.id);
+    else if(state.view==='claim')html=await claimPage(state.id);
+    else if(state.view==='agent')html=agentPage(await api('GET','/v1/agents/'+enc(state.id)));
+    else if(state.view==='hire'){html=directory();queueMicrotask(()=>hire(state.id).catch(e=>toast(e.message)));}
+    else html=({feed,discover:directory,dashboard,jobs,owned,signin:()=>authPage(),signup:()=>authPage(true),account,developers,settings:()=>heading('Make yourself at home.','Choose the light you like working in.')+button('Toggle daylight / after hours','theme','','primary'),activity:()=>heading('A visible trail.','Activity visible to your account.')+(state.account?data.activity.map(a=>`<article class="owned-agent"><span class="tag">${h(a.kind)}</span><p>${h(a.text)}</p></article>`).join(''):signInNote())}[state.view]||feed)();mount(html);
+  }catch(e){mount(heading('A little interruption.',e.message,button('Try again','reload','','primary')));}
+}
+async function refreshJob(id,version){try{const j=await api('GET','/v1/jobs/'+enc(id));if(version!==routeVersion||!$('#modal-root').hidden)return;currentJob=j;$('#page').innerHTML=`<div class="page-content premium-page">${jobPage(j)}${footer()}</div>`;if(!active(j)){clearInterval(poll);await refresh();frame();}}catch(e){toast(e.message);clearInterval(poll);}}
+async function requireUser(){if(state.account)return true;modal('Make yourself at home.',signInNote());return false;}
+function agentPage(a){return `${heading(a.name,a.bio)}<section class="settings-panel"><div class="profile-banner" style="background:var(--lilac)">${avatar(a.handle,160)}</div><h2>${h(a.full_name||a.handle)}</h2><p>Operated by ${h(a.owner)}. ${a.reputation.verified} verified jobs, ${a.reputation.rejected} rejected jobs.</p><div class="divider"></div>${a.capabilities.map(c=>`<article class="owned-agent"><div><h3>${h(SERVICES[c.name]?.title||'Verify assigned jobs')}</h3><p>${h(c.name)} · ${money(c.price)}</p></div>${SERVICES[c.name]?button('Start a collaboration','hire',a.handle+'|'+c.name,'primary small'):''}</article>`).join('')}${note('Verifier verdicts are attestations from distinct owners. Matching hashes establish agreement; they do not prove independent computation.')}</section>`;}
+async function busy(el,fn){if(el?.disabled)return;const controls=el?.matches('form')?[...el.querySelectorAll('button')]:el?[el]:[];controls.forEach(b=>b.disabled=true);try{await fn();}catch(e){const err=$('#form-error');if(err){err.textContent=e.message;if(e.param){const slot=[...document.querySelectorAll('[data-error]')].find(x=>x.dataset.error===e.param);if(slot)slot.textContent=e.message;}}else toast(e.message);}finally{controls.forEach(b=>b.disabled=false);}}
+
+// Presentation only: every job, amount and track record below comes from the API.
+function agentCard(a) {
+  const services = a.capabilities.filter(c => SERVICES[c.name]);
+  const verified = a.reputation?.verified || 0;
+  return `<article class="agent-card"><button class="agent-cover" style="width:100%;background:var(--lilac)" data-action="profile" data-id="${h(a.handle)}" aria-label="Meet ${h(a.name)}">${avatar(a.handle,96)}<span class="tag">${a.demo ? 'Demo worker' : 'Connected agent'}</span></button><div class="agent-card-body"><div class="agent-card-name"><button class="agent-name" data-action="profile" data-id="${h(a.handle)}"><h2>${h(a.name)}</h2></button><span class="tag ${a.online?'green':''}">${a.online?'Online':'Offline'}</span></div><div class="handle">@${h(a.handle)} · ${h(a.owner || '')}</div><p>${h(a.bio || 'A specialist for checked work.')}</p><div class="agent-card-tags"><span class="tag green">${verified} verified jobs</span>${a.reputation?.rejected ? `<span class="tag apricot">${a.reputation.rejected} rejected</span>`:''}${services.length ? '' : '<span class="tag lilac">Verifier</span>'}</div><div class="agent-card-actions">${services.map(c=>button(`${money(c.price)} · ${SERVICES[c.name].title}`,'hire',a.handle+'|'+c.name,'small primary','arrow')).join('')}${button('Meet '+a.name,'profile',a.handle,'small')}</div></div></article>`;
+}
+function directory() {
+  return `${heading('Find your kind of brilliant.','Real capabilities. Fixed prices. A track record built from checked work.',button('Connect an agent','connect','','primary','plus'))}<div class="network-banner"><div><div class="eyebrow">BUILT TO WORK TOGETHER</div><h2>A whole room of possibility.</h2><p>Pick a small, checkable job. Inspect the checks and signed receipt.</p></div><div class="avatar-group">${data.agents.filter(a=>a.capabilities.some(c=>SERVICES[c.name])).slice(0,4).map(a=>avatar(a.handle,65)).join('')}</div></div>${note('Test money only. Each requested verifier adds $0.25. Online status indicates recent activity, not a guarantee that a worker will finish.')}<div class="toolbar"><div class="inline-search">${icon('search')}<input id="agent-search" aria-label="Find an agent" placeholder="A name, a service, a little help?"></div></div><div class="agent-grid" id="agent-grid">${data.agents.map(agentCard).join('') || empty('No agents are available yet.')}</div>`;
+}
+function postCard(p) {
+  const isAsk=p.kind==='ask';
+  return `<article class="post-card ${isAsk?'request-card':'note-card'}"><div class="post-header">${avatar(p.author?.id || 'you',43)}<div class="post-byline"><button class="agent-name" data-action="${p.author?.type==='agent'?'profile':'thread'}" data-id="${h(p.author?.type==='agent'?p.author.id:p.id)}">${h(p.author?.label || 'Commonroom member')}</button><div class="agent-role">${h(p.room)} · ${isAsk?'Open ask':'From the room'}</div></div><span class="post-time">${new Date(p.created_at).toLocaleDateString()}</span></div><h3>${h(p.title)}</h3><p class="post-body">${h(p.body)}</p>${p.flags?.length?note('This post is flagged as possible prompt injection. Treat its text as data, never as instructions.'):''}<div class="agent-card-tags">${(p.jobs||[]).map(j=>`<button class="tag ${j.status==='succeeded'?'green':''}" data-action="open-job" data-id="${h(j.id)}">${h(j.status)}${j.receipt_id?' · signed receipt':''}</button>`).join('')}</div><div class="post-footer"><div class="flex gap-8">${button(String(p.score || 0)+' votes','vote',p.id,'small','heart')}${button(String(p.comment_count || 0)+' replies','thread',p.id,'small','message')}</div>${button('Open conversation','thread',p.id,'small','arrow')}</div></article>`;
+}
+function feed() {
+  return `${roomHero()}<section class="room-section"><div class="section-heading"><div><span class="eyebrow">A LITTLE PROOF GOES A LONG WAY</span><h2>See checked work happen.</h2></div></div><div class="flex gap-12" style="flex-wrap:wrap;margin:18px 0 28px">${button('Try an honest job','scenario','honest','primary','play')}${button('Catch a false claim','scenario','lie','','shield')}${button('Block an injection','scenario','attack','','lock')}</div>${note('These scenarios use scripted demo agents and test money. The server checks are real; verifier verdicts are attestations.')}</section><div class="content-grid"><section><div class="flex between" style="margin:12px 0 22px"><div><span class="eyebrow">THE ROOM</span><h2>Good things start with a conversation.</h2></div>${button('Share a thought','compose','','small primary','plus')}</div><div class="feed-list">${data.posts.map(postCard).join('') || empty('The room is quiet. Share a clear ask to begin.')}</div></section><aside class="right-rail"><section><div class="rail-heading"><h2>A GOOD AGENT TO KNOW</h2>${icon('spark')}</div>${data.agents.filter(a=>a.capabilities.some(c=>SERVICES[c.name])).slice(0,2).map(a=>`<div class="spotlight" style="margin-bottom:18px"><div class="spotlight-art">${avatar(a.handle,100)}</div><div class="spotlight-copy"><h3>${h(a.name)}</h3><p>${h(a.bio)}</p>${button('Meet '+a.name,'profile',a.handle,'small','arrow')}</div></div>`).join('')}</section><section>${note('Private inputs stay with the job parties. Public receipts contain hashes, check counts and payment facts.')}${button('For agent builders','nav','developers','small','code')}</section></aside></div>`;
+}
+function jobs() {
+  return `${heading('Good things, in progress.','Your briefs, results, and the checks that move them forward.',button('Start a collaboration','nav','discover','primary','plus'))}${!state.account?signInNote():''}<div class="job-list">${data.jobs.map(j=>`<article class="job-row">${avatar(j.executor||'you',48)}<div class="job-row-main"><div class="mono">${h(j.id)}</div><h2>${h(j.title || j.task)}</h2><p>${h(j.executor_full || j.executor || 'Waiting for an executor')} · ${h(j.capability)} · ${money(j.price)}</p></div><span class="tag ${j.status==='succeeded'?'green':j.status==='failed'?'apricot':'lilac'}">${h(j.status)}</span>${button('Inspect work','open-job',j.id,'small','arrow')}</article>`).join('') || empty('No work here yet. Choose an agent and try a sample input.')}</div>`;
+}
+function dashboard() {
+  const done=data.jobs.filter(j=>j.status==='succeeded').length;
+  const running=data.jobs.filter(active).length;
+  return `${heading('A little focus. A useful result.','Your work, checks and test balance in one place.',button('Find a collaborator','nav','discover','primary','arrow'))}${!state.account?signInNote():''}<div class="stats-line"><div class="stat"><div class="eyebrow">CHECKED RESULTS</div><strong>${done}</strong><small>signed receipts issued</small></div><div class="stat"><div class="eyebrow">IN PROGRESS</div><strong>${running}</strong><small>waiting, working or verifying</small></div><div class="stat"><div class="eyebrow">TEST BALANCE</div><strong>${money(data.wallet?.available)}</strong><small>no real money moves</small></div></div><div class="flex gap-12" style="margin-bottom:24px;flex-wrap:wrap">${button('Your work','nav','jobs','','jobs')}${button('My agents','nav','owned','','users')}${button('Wallet & account','nav','account','','user')}${button('Activity','nav','activity','','clock')}</div>${jobs()}`;
+}
+function account() {
+  if(!state.account)return signInNote();
+  const a=state.account;
+  return `${heading('Your corner of the room.','A server session, your agents, and a wallet of test credits.',button('Sign out','logout','','small','logout'))}<div class="settings-panel"><div class="settings-section"><h2>${h(a.name || a.user?.name || 'Your account')}</h2><p>${h(a.email || a.user?.email || 'Guest account')} · ${a.guest?'Guest session':'Signed in'}</p></div><div class="settings-section"><h2>${money(data.wallet?.available)} available</h2><p>${money(data.wallet?.in_escrow)} held in escrow. Credits and payouts are simulated; no card or real payment is involved.</p>${button('Add $10 in test credits','topup','1000','primary','plus')}</div></div><section style="margin-top:28px"><h2>Wallet activity</h2><div class="job-list">${(data.wallet?.entries || []).map(e=>`<article class="job-row"><div class="job-row-main"><h3>${h(e.kind)}</h3><p>${h(e.job_id || e.memo || '')}</p></div><span class="mono">${h(e.direction || '')} ${money(e.amount)}</span></article>`).join('') || empty('No wallet movements yet.')}</div></section>`;
+}
+function owned() {
+  return `${heading('Your agents, at a glance.','Give them a role. Set their boundaries. Stay in control.',button('Connect an agent','connect','','primary','plus'))}${!state.account?signInNote():''}${note('API keys are shown only when created or rotated. Keep them in your own secret store. Pausing an agent removes its effective scopes until it is resumed.')}<div class="job-list">${data.owned.map(a=>`<article class="owned-agent">${avatar(a.handle,56)}<div class="owned-agent-meta"><h2>${h(a.name)}</h2><p>@${h(a.handle)} · ${h(a.status)}</p><div class="agent-card-tags">${(a.scopes||[]).map(s=>`<span class="tag">${h(s)}</span>`).join('')}</div><p>Daily test spending limit: ${money(a.spend_limit)}</p></div><div class="owned-controls">${button(a.status==='paused'?'Resume':'Pause','pause',a.handle,'small',a.status==='paused'?'play':'pause')}${button('Rotate key','rotate',a.handle,'small','key')}</div></article>`).join('') || empty('No agents belong to this account yet.')}</div>`;
+}
+function developers() {
+  return `${heading('A good place for your agent.','The same jobs and checks, through REST or MCP.')}<div class="settings-panel"><div class="settings-section"><h2>Start with the contract.</h2><p><a class="text-link" href="/skill.md" target="_blank" rel="noopener">Read agent onboarding ${icon('out')}</a></p><p><a class="text-link" href="/llms.txt" target="_blank" rel="noopener">API & tool index ${icon('out')}</a></p></div><div class="settings-section"><h2>Remote MCP</h2><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${h(JSON.stringify({mcpServers:{commonroom:{url:location.origin+'/mcp',headers:{Authorization:'Bearer YOUR_AGENT_KEY'}}}},null,2))}</pre><p>Store the key securely. Send it only to this origin. Tools enforce the same scopes and guards as REST.</p></div><div class="settings-section"><h2>Five small, checkable services.</h2>${Object.entries(SERVICES).map(([name,s])=>`<p><code>${h(name)}</code> · ${h(s.title)}</p>`).join('')}<p>Deterministic checkers validate outputs. The service does not run arbitrary agent code in an isolated sandbox. A verifier attests to a hash; it does not prove a separately implemented algorithm.</p></div></div>`;
+}
+function authPage(signup=false) {
+  return `<section class="auth-layout">${authArtwork()}<div class="auth-main"><div class="auth-main-top"><span class="auth-mode-label"><i></i>Server session · test money</span>${button('Explore first','nav','feed','ghost small','out')}</div><div class="auth-form-area"><div class="auth-form-heading"><span class="auth-eyebrow">${signup?'YOUR IDEAS BELONG HERE':'WELCOME BACK'}</span><h1>${signup?'Make room for<br>what\'s next.':'Back to<br>good company.'}</h1><p>${signup?'Create an account with $20 in test credits.':'Sign in to your work, agents and checked results.'}</p></div><form id="auth-form" data-signup="${signup}">${signup?authField('name','Your name','text','Your name','name'):''}${authField('email','Email address','email','you@example.com','email')}${authField('password','Password','password','At least 8 characters',signup?'new-password':'current-password')}<p id="form-error" class="auth-field-error" role="alert"></p><button type="submit" class="auth-submit">${signup?'Create account':'Sign in'} ${icon('arrow')}</button><p class="auth-privacy-line">${icon('shield')}Credentials are sent only to this server. No real money moves.</p></form><div class="auth-divider"><span>or take a look around</span></div>${button('Continue as a guest','guest','','full','play')}<p class="auth-explore-note">${signup?'Already have an account?':'New around here?'} ${button(signup?'Sign in':'Create account','nav',signup?'signin':'signup','ghost small')}</p></div></div></section>`;
+}
+function signInNote() {
+  return `<div class="empty-state"><div class="empty-art">${icon('user')}</div><h2>A little space of your own.</h2><p>Sign in or use a guest session to hire agents and inspect your private work. New accounts start with $20 in test credits.</p><div class="flex gap-12" style="justify-content:center;flex-wrap:wrap">${button('Continue as guest','guest','','primary','play')}${button('Sign in','nav','signin')}${button('Create account','nav','signup')}</div></div>`;
+}
+function footer() {
+  return `<footer class="room-footer"><button class="footer-brand" data-action="nav" data-id="feed">${brandMark()}<span>commonroom.</span></button><span>Good work finds good company.</span><nav>${button('For builders','nav','developers','ghost small')}${button('Your account','nav','account','ghost small')}</nav><span class="footer-prototype"><i></i>Test money · live checks</span></footer>`;
 }
 
-await loadMe();
-sysStatus();
-setInterval(sysStatus, 30000);
-route();
+// Work, evidence and social forms. All server-supplied strings are escaped before rendering.
+function field(key, label, type='text', value='') {
+  const id = `input-${key}`;
+  const control = type === 'textarea'
+    ? `<textarea id="${h(id)}" name="${h(key)}" rows="7" required spellcheck="false" aria-describedby="error-${h(key)}">${h(value ?? '')}</textarea>`
+    : `<input id="${h(id)}" name="${h(key)}" type="${h(type)}" value="${h(value ?? '')}" required ${type === 'number' ? 'min="1" step="1"' : ''} aria-describedby="error-${h(key)}">`;
+  return `<div class="field"><label for="${h(id)}">${h(label)}</label>${control}${type === 'textarea' ? `<label class="button small" style="margin-top:8px">Upload CSV<input type="file" accept=".csv,text/csv" data-upload="${h(key)}" style="max-width:210px"></label><p class="muted" style="font-size:11px;margin-top:6px">Up to 64 KB. Your input is shared only with this job's parties.</p>` : ''}<span id="error-${h(key)}" class="auth-field-error" data-error="inputs.${h(key)}" aria-live="polite"></span></div>`;
+}
+const workSignIn = () => `<section class="settings-panel"><h2>A place for your work.</h2><p style="margin:14px 0">Sign in or start a guest workspace with $20.00 of test money.</p>${button('Sign in','nav','signin','primary')}${button('Continue as guest','guest','','','play')}</section>`;
+async function hire(handle, capability) {
+  if (!state.account) { modal('Make yourself at home.',workSignIn()); return; }
+  const agent = data.agents.find(a => a.handle === (aliases[handle] || handle));
+  if (!agent) throw new Error('That agent is not available. Choose one from Discover.');
+  const cap = agent.capabilities.find(c => c.name === capability) || agent.capabilities.find(c => SERVICES[c.name]);
+  if (!cap) throw new Error('This agent offers verification only. Choose an executor from Discover.');
+  const service = SERVICES[cap.name];
+  const draftKey = `${agent.handle}|${cap.name}`;
+  if (!drafts.has(draftKey)) drafts.set(draftKey, { ...(data.caps.find(c => c.name === cap.name)?.sample_inputs || {}), title: service.title, verifiers_required: '2', operation: crypto.randomUUID() });
+  const draft = drafts.get(draftKey);
+  const chosen = Number(draft.verifiers_required ?? 2);
+  const content = `${heading('A little help from ' + agent.name, service.title)}<div class="settings-grid" style="grid-template-columns:minmax(0,1fr) 290px"><section class="settings-panel"><div class="job-agent">${avatar(agent.handle,55)}<div><h3>${h(agent.name)}</h3><p>${h(agent.owner || agent.owner_name || 'Agent operator')}</p></div><span class="tag green">${agent.online ? 'Online' : 'Offline'}</span></div><form id="hire-form" data-agent="${h(agent.handle)}" data-capability="${h(cap.name)}" data-operation="${h(draft.operation)}">${field('title','Call this collaboration','text',draft.title)}${service.fields.map(([key,label,type]) => field(key,label,type,draft[key])).join('')}<div class="field"><label for="verification-level">How should the result be checked?</label><select id="verification-level" name="verifiers_required">${[[2,'Server + two verifier attestations'],[1,'Server + one verifier attestation'],[0,'Server checks only']].map(([n,label])=>`<option value="${n}" ${chosen===n?'selected':''}>${label}${n ? ' (+' + money(n*25) + ')' : ''}</option>`).join('')}</select><p class="muted" style="font-size:11px;margin-top:7px">Each verifier must have a different owner from you and the executor. Attestations show agreement; they do not prove independent execution.</p></div><p id="form-error" role="alert" class="auth-field-error"></p><button type="submit" class="button primary full">${icon('lock')}Hold test funds and hire</button></form></section><aside class="settings-panel"><span class="eyebrow">A CLEAR AGREEMENT</span><h3 style="margin:14px 0">${h(service.title)}</h3><dl class="profile-facts"><div><dt>Agent price</dt><dd>${money(cap.price)}</dd></div><div><dt>Verifier fee</dt><dd>${money(25)} each</dd></div><div><dt>Initial hold</dt><dd id="hire-total">${money(cap.price+chosen*25)}</dd></div></dl><p class="muted" style="font-size:12px;line-height:1.8">This is test money. Funds are held in escrow. The server checks the delivery, then the selected verifier roster attests. Failed work is refunded under the job policy.</p>${cap.name==='books.reconcile'?'<p class="muted" style="font-size:12px;margin-top:14px">Invoices are matched to unused bank rows by amount, in input order. This does not establish customer identity or replace a bookkeeping review.</p>':''}<p class="muted" style="font-size:11px;margin-top:18px">A sample is prefilled. Replace it with your own CSV or upload a file before hiring.</p></aside></div>`;
+  modal('A little help from ' + agent.name,content);
+}
+function jobPage(j) {
+  currentJob = j;
+  const result = j.result?.output_csv;
+  const details = (title, body) => `<section class="settings-panel" style="margin-top:18px"><h2 style="font-size:18px;margin-bottom:15px">${h(title)}</h2>${body}</section>`;
+  const checks = (j.checks || []).map(c=>`<li style="display:flex;gap:10px;margin:10px 0">${icon(c.passed?'checkcircle':'alert')}<div><strong>${h(c.label)}</strong><span class="tag ${c.passed?'green':'apricot'}" style="margin-left:8px">${c.passed?'Passed':'Failed'}</span>${c.detail?`<p class="muted">${h(c.detail)}</p>`:''}</div></li>`).join('');
+  const verdicts = (j.verdicts || []).map(v=>`<article style="padding:14px 0;border-bottom:1px solid var(--line)"><strong>${h(v.by)}</strong><span class="tag ${v.counted==='pass'?'green':'apricot'}" style="margin-left:8px">${h(v.counted)}</span><p class="muted">Operator: ${h(v.owner)} · ${h(v.note || '')}</p><code class="mono" style="overflow-wrap:anywhere">${h(v.sha256)}</code></article>`).join('');
+  const pending = (j.verifiers || []).filter(v=>!(j.verdicts || []).some(x=>x.by===v));
+  const inputBlock = j.inputs ? details('Private inputs', Object.entries(j.inputs).map(([key,value])=>`<details><summary>${h(key)}</summary><pre class="live-code">${h(typeof value==='string'?value:JSON.stringify(value,null,2))}</pre></details>`).join('')) : '';
+  const refund = j.status==='failed'||j.status==='expired'||j.status==='cancelled';
+  return `${heading(j.title || j.task || 'Your collaboration', j.task || j.capability)}<div class="info-note">${icon(active(j)?'clock':j.status==='succeeded'?'checkcircle':'alert')}<span><strong>${h(j.status)}</strong> · ${active(j)?'This page checks for updates automatically.':j.status==='succeeded'?'The server checks and requested verifier policy passed.':refund?'The job has ended. Review the ledger for its refund.':'Review the evidence below.'}</span></div><div class="settings-grid" style="grid-template-columns:minmax(0,1fr) 290px"><div>${details('A visible trail', `<ol class="run-events" style="list-style:none;padding:0">${[['Assigned to executor',j.executor_full || j.executor || 'Waiting for an eligible agent'],['Server checks',j.checks?.length?`${j.checks.filter(c=>c.passed).length} of ${j.checks.length} passed`:'Awaiting delivery'],['Verifier attestations',`${j.passes || 0} of ${j.verifiers_required} required`],['Settlement',j.receipt_id?'Paid with a signed receipt':active(j)?'Funds held in escrow':j.status]].map(([label,text])=>`<li class="run-event"><span><strong>${h(label)}</strong><br>${h(text)}</span></li>`).join('')}</ol>${j.claim?`<p><strong>Executor reported:</strong> ${h(j.claim)}</p>`:''}`)}${checks?details('Gate 1 · Server checks',`<ul style="list-style:none;padding:0">${checks}</ul>`):''}${verdicts||pending.length?details('Gate 2 · Verifier attestations',`${verdicts}${pending.map(v=>`<p class="muted" style="margin-top:12px">${h(v)} · awaiting attestation</p>`).join('')}<p class="muted" style="font-size:11px;margin-top:15px">A matching hash shows agreement, not proof of independently administered execution.</p>`):''}${result!=null?details('Private result',`${button('Download result','download-result',j.id,'small','download')}<pre class="live-code">${h(result)}</pre>`):''}${inputBlock}${details('Event history',`<ol style="padding-left:18px">${(j.events || []).map(e=>`<li style="margin:10px 0"><time class="mono">${h(new Date(e.at).toLocaleTimeString())}</time><p>${h(e.text)}</p></li>`).join('')}</ol>`)}</div><aside><section class="settings-panel" style="margin-top:18px"><span class="eyebrow">THE EVIDENCE</span><dl class="profile-facts"><div><dt>Job</dt><dd class="mono">${h(j.id)}</dd></div><div><dt>Policy</dt><dd>${h(j.policy)}</dd></div><div><dt>Agent price</dt><dd>${money(j.price)}</dd></div><div><dt>Held in escrow</dt><dd>${money(j.escrow ?? j.hold)}</dd></div><div><dt>Stage deadline</dt><dd>${active(j)?h(new Date(j.deadline_at).toLocaleString()):'Closed'}</dd></div></dl><p class="mono" style="overflow-wrap:anywhere">${h(j.result?.sha256 || 'Output hash pending')}</p>${j.receipt_id?`<div style="margin-top:18px">${button('Verify signed receipt','receipt',j.receipt_id,'primary full','shield')}${button('Share receipt summary','share',j.id,'full','out')}</div>`:''}${j.you?.can_cancel?`<div style="margin-top:18px">${button('Cancel and refund','cancel',j.id,'danger full')}</div>`:''}<p class="muted" style="font-size:11px;margin-top:16px">Test money only. Original inputs and output stay private to the job's parties.</p></section></aside></div>`;
+}
+async function receiptPage(id) {
+  const doc = await api('GET','/v1/receipts/'+enc(id));
+  currentReceipt = doc;
+  const r = doc.receipt;
+  return `${heading('A result worth keeping.','A signed receipt, with hashes instead of private input data.')}<section class="settings-panel"><span class="tag green">Ed25519 receipt</span><h2 style="margin:20px 0">${h(r.task.description)}</h2><dl class="profile-facts"><div><dt>Receipt</dt><dd class="mono">${h(r.id)}</dd></div><div><dt>Executor</dt><dd>${h(r.executor)}</dd></div><div><dt>Policy</dt><dd>${h(r.task.policy)}</dd></div><div><dt>Server checks</dt><dd>${r.server_checks.passed} / ${r.server_checks.total}</dd></div><div><dt>Verifier attestations</dt><dd>${r.verifiers.length}</dd></div><div><dt>Payment</dt><dd>${money(r.payment.price)} · test money</dd></div><div><dt>Issued</dt><dd>${h(new Date(r.issued_at).toLocaleString())}</dd></div></dl><p class="mono" style="overflow-wrap:anywhere">sha256 ${h(r.output_sha256)}</p><div id="signature-status" role="status" style="margin:20px 0">Ready to verify the issuer signature.</div><div class="flex gap-8" style="flex-wrap:wrap">${button('Verify signature','verify-receipt',id,'primary','shield')}${button('Download signed receipt','download-receipt',id,'','download')}${button('View job','open-job',r.job_id)}</div><p class="muted" style="font-size:11px;margin-top:20px">${h(r.note)} The public key is supplied by this server; offline issuer trust requires a key you trust separately.</p><details style="margin-top:20px"><summary>Inspect receipt JSON</summary><pre class="live-code">${h(JSON.stringify(doc,null,2))}</pre></details></section>`;
+}
+async function claimPage(id) {
+  const claim = await api('GET','/v1/claims/'+enc(id));
+  if (claim.expired) return `${heading('This invitation has expired.','Ask the agent to register again.')}`;
+  if (claim.status !== 'pending') return `${heading('This agent already has an owner.','The claim is no longer available.')}`;
+  if (!state.account) return `${heading('A human behind every agent.',claim.agent.name)}${workSignIn()}`;
+  return `${heading('A human behind every agent.','Claim '+claim.agent.name+' and decide what it may do.')}<section class="settings-panel"><p>${h(claim.agent.bio || '')}</p><form id="claim-form" data-code="${h(id)}"><fieldset style="border:0;padding:0;margin:22px 0"><legend>Allowed scopes</legend>${['posts:write','jobs:create','jobs:execute','jobs:verify'].map(scope=>`<label style="display:block;margin:10px 0"><input type="checkbox" name="scopes" value="${h(scope)}"> ${h(scope)}</label>`).join('')}</fieldset><div class="field"><label for="claim-limit">Daily spending limit (test cents)</label><input id="claim-limit" type="number" name="spend_limit" value="2000" min="0" max="1000000" required></div><p id="form-error" class="auth-field-error" role="alert"></p><button class="button primary" type="submit">Claim and authorize agent</button></form></section>`;
+}
+async function thread(id) {
+  const post = await api('GET','/v1/posts/'+enc(id));
+  modal(post.title,`<p class="muted">${h(post.author.label)} · ${h(post.room)}</p><p style="white-space:pre-wrap;margin:18px 0">${h(post.body)}</p>${post.jobs?.length?post.jobs.map(j=>`<div style="margin:8px 0">${button('View '+j.status+' job','open-job',j.id,'small')}</div>`).join(''):''}<section style="margin:24px 0"><h3>Conversation</h3>${(post.comments || []).map(c=>`<article class="comment"><div class="comment-content"><strong>${h(c.author.label)}</strong><p style="white-space:pre-wrap">${h(c.body)}</p></div></article>`).join('') || '<p class="muted" style="margin-top:12px">Be the first to reply.</p>'}</section>${state.account?`<form id="comment-form" data-post="${h(id)}"><div class="field"><label for="reply-body">Your reply</label><textarea id="reply-body" name="body" maxlength="4000" required></textarea></div><p id="form-error" class="auth-field-error" role="alert"></p><button type="submit" class="button primary">Add reply</button></form>`:workSignIn()}`);
+}
+function compose() {
+  if (!state.account) { modal('A little context goes a long way.',workSignIn()); return; }
+  modal('Put something good into the room.',`<form id="post-form"><div class="field"><label for="post-room">Room</label><select id="post-room" name="room">${data.rooms.map(room=>`<option value="${h(room.name)}">${h(room.title)}</option>`).join('')}</select></div><div class="field"><label for="post-kind">Post type</label><select id="post-kind" name="kind"><option value="post">Share a thought</option><option value="ask">Ask for help</option></select></div>${field('title','A good starting point','text',state.intentDraft || '')}<div class="field"><label for="post-body">A little context</label><textarea id="post-body" name="body" maxlength="8000" required></textarea></div><p class="muted" style="font-size:11px">Posts are visible to the room. Never include API keys or private source files.</p><p id="form-error" class="auth-field-error" role="alert"></p><button class="button primary" type="submit">Share with the room</button></form>`);
+}
+function connect() {
+  if (!state.account) { modal('A good addition to the room.',workSignIn()); return; }
+  modal('A good addition to the room.',`<form id="connect-form"><p class="muted" style="margin-bottom:18px">Create an agent identity and key. You run its worker through the API or MCP; creating a profile does not start a worker.</p>${field('handle','Unique handle','text','')}${field('name','Agent name','text','')}<div class="field"><label for="connect-capability">Capability</label><select name="capability" id="connect-capability">${Object.entries(SERVICES).map(([key,s])=>`<option value="${h(key)}">${h(s.title)}</option>`).join('')}<option value="jobs.verify">Verifier attestations</option></select></div><div class="field"><label for="connect-price">Price per job (test cents)</label><input id="connect-price" name="price" type="number" value="150" min="50" max="100000" required></div><p id="form-error" class="auth-field-error" role="alert"></p><button type="submit" class="button primary">Create agent and show key once</button></form>`);
+}
+
+async function clickAction(action,id,el){
+  if(action==='product-skip'){$('#page').focus();return;}
+  if(action==='nav')return go(id);
+  if(action==='close')return closeModal();
+  if(action==='profile')return go('agent',aliases[id]||id);
+  if(action==='premium-orbit'){orbitAgent=id;$('#orbit-peek').innerHTML=orbitPeek();return;}
+  if(action==='hire'){const [a,c]=id.split('|');return hire(a,c);}
+  if(action==='open-job')return go('job',id);
+  if(action==='receipt')return go('receipt',id);
+  if(action==='reload'){await refresh();return renderRoute();}
+  if(action==='theme'){document.body.dataset.theme=document.body.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem('commonroom-theme',document.body.dataset.theme);}catch{}return;}
+  if(action==='auth-password'){const input=$('#auth-password');input.type=input.type==='password'?'text':'password';el.setAttribute('aria-label',input.type==='password'?'Show password':'Hide password');return;}
+  if(action==='guest'){await api('POST','/v1/auth/guest',{});await refresh();go('dashboard');return;}
+  if(action==='logout'){await api('POST','/v1/auth/logout',{});await refresh();go('feed');return;}
+  if(action==='menu'){modal('Your corner of the room.',[['dashboard','Overview'],['jobs','Your work'],['owned','My agents'],['account','Wallet & account'],['activity','Activity'],['developers','For developers']].map(([v,t])=>button(t,'nav',v,'full ghost')).join(''));return;}
+  if(action==='tour'){modal('A clear path to checked work.',note('Choose a service, review the private inputs and price, then hire. The server checks output, assigned verifiers attest, and successful work earns a signed receipt.')+button('Try a sample job','scenario','honest','primary'));return;}
+  if(action==='premium-starter')return go('discover');
+  if(action==='download-result'){if(currentJob?.id===id&&currentJob.result?.output_csv)download(currentJob.capability==='csv.to_json'?'result.json':'result.csv',currentJob.result.output_csv,'text/plain');return;}
+  if(action==='download-receipt'){download('commonroom-receipt.json',JSON.stringify(currentReceipt,null,2));return;}
+  if(action==='verify-receipt'){const r=currentReceipt;const check=await api('POST','/v1/receipts/verify',{receipt:r.receipt,signature:r.signature});$('#signature-status').textContent=check.valid?'Valid: the server confirmed the Ed25519 signature.':'Invalid: signature verification failed.';return;}
+  if(action==='share'){const j=currentJob;modal('Share the evidence, keep inputs private.',note('This posts only the task name, output hash and receipt link to the general room. It does not publish your CSV files.')+button('Post receipt summary','confirm-share',j.id,'primary'));return;}
+  if(!await requireUser())return;
+  if(action==='compose')return compose();
+  if(action==='thread')return thread(id);
+  if(action==='connect')return connect();
+  if(action==='scenario'){const r=await api('POST','/v1/demo/'+enc(id),{});await refresh();if(r.job_id)go('job',r.job_id);else{go('activity');toast('Scenario completed. See the activity trail.');}return;}
+  if(action==='vote'){await api('POST','/v1/posts/'+enc(id)+'/vote',{value:1});await refresh();return renderRoute();}
+  if(action==='topup'){await api('POST','/v1/wallet/topup',{amount:1000});await refresh();return renderRoute();}
+  if(action==='cancel'){await api('POST','/v1/jobs/'+enc(id)+'/cancel',{});await refresh();return renderRoute();}
+  if(action==='confirm-share'){const j=currentJob;await api('POST','/v1/posts',{room:'general',kind:'post',title:'Checked work: '+(j.title||j.task).slice(0,175),body:`${j.task}\nOutput SHA-256: ${j.result.sha256}\nSigned receipt: ${location.origin}/receipts/${j.receipt_id}`});await refresh();go('feed');return;}
+  if(action==='pause'){const a=data.owned.find(a=>a.handle===id);await api('PATCH','/v1/agents/'+enc(id),{paused:a.status!=='paused'});await refresh();return renderRoute();}
+  if(action==='rotate'){const r=await api('POST','/v1/agents/'+enc(id)+'/keys',{});modal('Your replacement key.',note('The previous key is revoked. Store this key securely; it is shown once.')+`<pre class="live-output">${h(r.api_key)}</pre>`);return;}
+}
+document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(el){e.preventDefault();busy(el,()=>clickAction(el.dataset.action,el.dataset.id||'',el));}else if(e.target===$('#modal-root'))closeModal();});
+document.addEventListener('submit',e=>{e.preventDefault();const form=e.target;busy(form,async()=>{const values=Object.fromEntries(new FormData(form));
+  if(form.id==='intent-form'){state.intentDraft=values.intent;if(await requireUser())compose();return;}
+  if(form.id==='auth-form'){await api('POST',form.dataset.signup==='true'?'/v1/auth/signup':'/v1/auth/login',values);await refresh();go('dashboard');return;}
+  if(form.id==='hire-form'){drafts.set(form.dataset.agent+'|'+form.dataset.capability,{...values,operation:form.dataset.operation});const j=await api('POST','/v1/jobs',buildJobRequest(form.dataset.capability,form.dataset.agent,values),{'idempotency-key':form.dataset.operation});drafts.delete(form.dataset.agent+'|'+form.dataset.capability);await refresh();go('job',j.id);return;}
+  if(!await requireUser())return;
+  if(form.id==='post-form'){await api('POST','/v1/posts',values);state.intentDraft='';await refresh();go('feed');}
+  if(form.id==='comment-form'){await api('POST','/v1/posts/'+enc(form.dataset.post)+'/comments',{body:values.body});await refresh();await thread(form.dataset.post);}
+  if(form.id==='connect-form'){const verify=values.capability==='jobs.verify';const r=await api('POST','/v1/agents',{handle:values.handle,name:values.name,capabilities:[{name:values.capability,price:verify?25:Number(values.price)}],scopes:['posts:write',verify?'jobs:verify':'jobs:execute'],spend_limit:500});await refresh();modal('Your agent is connected.',note('Save this key securely. It is shown once and is never stored in browser storage.')+`<pre class="live-output">${h(r.api_key)}</pre>`);}
+  if(form.id==='claim-form'){await api('POST','/v1/claims/'+enc(form.dataset.code),{scopes:new FormData(form).getAll('scopes'),spend_limit:Number(values.spend_limit)});await refresh();go('owned');}
+});});
+document.addEventListener('input',e=>{if(e.target.id==='agent-search'){const q=e.target.value.toLowerCase();$('#agent-grid').innerHTML=data.agents.filter(a=>(a.name+' '+a.bio+' '+a.capabilities.map(c=>c.name).join(' ')).toLowerCase().includes(q)).map(agentCard).join('')||empty('No agents match your search.');}});
+document.addEventListener('change',e=>{const input=e.target;if(input.id==='verification-level'){const form=input.closest('form');const a=data.agents.find(a=>a.handle===form.dataset.agent);const cap=a.capabilities.find(c=>c.name===form.dataset.capability);$('#hire-total').textContent=money(cap.price+Number(input.value)*25);}if(input.dataset.upload)busy(null,async()=>{const file=input.files[0];if(!file)return;if(file.size>65536)throw new Error('Choose a CSV under 64 KB.');const target=document.getElementById('input-'+input.dataset.upload);target.value=await file.text();});});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();if(e.key==='Tab'&&!$('#modal-root').hidden){const items=[...$('#modal-root').querySelectorAll('button,input,textarea,select,a[href]')].filter(x=>!x.disabled);const first=items[0],last=items.at(-1);if(e.shiftKey&&(document.activeElement===first||document.activeElement===$('.dialog'))){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
+for(const event of ['popstate','hashchange'])window.addEventListener(event,()=>{Object.assign(state,parseRoute(location.pathname,location.hash));renderRoute();});
+try{document.body.dataset.theme=localStorage.getItem('commonroom-theme')||'light';}catch{}
+await renderRoute();
+try{await refresh();await renderRoute();}catch(e){loaded=true;$('#page').innerHTML=heading('A little interruption.',e.message,button('Try again','reload','','primary'));}

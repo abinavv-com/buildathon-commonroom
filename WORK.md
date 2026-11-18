@@ -20,10 +20,10 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 ## Status
 | Task | Owner | Status |
 |---|---|---|
-| Backend: auth, social, agents, wallet, jobs, receipts, guard, SSE, scenarios | coordinator | done; 9/9 tests; all 3 scenarios verified via the API |
-| Frontend (all pages, receipt printer, 21st.dev-adapted elements) | frontend subagent | in progress |
-| MCP (HTTP + stdio), skill.md, llms.txt, agents/run.mjs, verify-receipt.mjs | agent-platform subagent | in progress |
-| Hosting via Cloudflare tunnel | coordinator | after the frontend lands |
+| Backend: auth, social, agents, wallet, jobs, receipts, guards and scenarios | team | Implemented; isolated API tests pass |
+| HTTP + stdio MCP and five checked services | team | Implemented; all five services pass API/MCP and frontend contract checks |
+| Owner-supplied HTML frontend connected to live API | coordinator | Integrated: real sessions, five-service hiring, job evidence, receipts, social and owner controls |
+| Hosting | coordinator | Existing Vercel + Upstash deployment; new production release pending |
 
 ## 18 Nov, 17:20: serverless backend
 - Hosting: Vercel (static `public/` plus the `api/index.mjs` function) with Upstash Redis (`commonroom-kv`, Vercel Marketplace). The laptop backend and the Cloudflare tunnel are retired.
@@ -31,3 +31,15 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 - Production env vars: KV_* (from the integration), SIGNING_KEY_PEM, PUBLIC_URL, TRUST_PROXY=1. Local `.env.local` is gitignored.
 - Verified on Vercel with the laptop off: hire → verified → paid; the receipt verifies offline against the live public key; MCP works; the attack scenario logs 2 blocks.
 - Known limits: rate limits are per instance; the state document must stay under Upstash's request size (old job data is pruned after 150 jobs).
+
+
+## 18 Nov: rebuild continuation and frontend release
+- Reproduced and fixed reconciliation accepting altered customer details. Gate 1 now also compares the complete deterministic source-derived output.
+- Fixed handling of distinct bank rows that share dates/descriptions; matching counts actual rows including amount and disallows consuming a bank row beyond its available count.
+- Completed MCP discovery, hire inputs, local task calculation and blind auditing for `books.reconcile` and `catalog.clean`. Full MCP flows for both services reach signed receipts in the test suite.
+- Updated REST/MCP agent documentation for all five supported services, test money, blind verification and honest service limitations.
+- The owner requested integration of `Commonroom (2).html`, followed by GitHub push and production deployment to the existing Vercel project. The supplied visual design, responsive styles, hero composition and illustrations now wrap API-backed screens. Removed browser-local simulated account/job execution flows.
+- Browser inspection encountered a minimized intended browser window; automatic approval review rejected opening an unrelated WhatsApp window. No unrelated browser content was accessed. Rendered browser appearance remains unverified at this point.
+- Release readiness: Vercel CLI 59.7.0 is installed and its existing login succeeds. In PowerShell, use `vercel.cmd` because `vercel` resolves to a `.ps1` blocked by the current execution policy. No policy change is needed.
+- Validation: 35/35 tests passed on the integrated frontend and backend, including all five frontend hire contracts, HTTP asset MIME/CSP/deep routes, API trust/money rules, full MCP workflows and reconciliation regressions. JavaScript syntax and git diff whitespace checks passed.
+- Remaining release steps: finish runtime smoke check, commit without an AI co-author trailer, push normally, deploy with `vercel.cmd --prod --yes`, and verify the returned production URL. Do not commit to main after the 19:00 IST code freeze.
