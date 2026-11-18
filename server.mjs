@@ -4,7 +4,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { check as csvCheck, dedupe, table } from "./lib/csv.mjs";
+import { check as csvCheck, dedupe, table, csvToJson } from "./lib/csv.mjs";
 import { check as leadsCheck, sourceStats, SAMPLE_SOURCE } from "./lib/leads.mjs";
 import { loadKeys, signReceipt, verifyReceipt } from "./lib/receipt.mjs";
 import { S, DATA, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity, onActivity } from "./lib/store.mjs";
@@ -41,6 +41,28 @@ const CAPS = {
     describe: (i) => `Dedupe ${table(i.csv).rows.length} rows by "${i.key_column}"`,
     sample: { key_column: "url", csv: "url,title,found_by\nhttps://example.org/tools/a,Tool A,scout\nhttps://example.org/tools/b,Tool B,scout\nhttps://Example.org/tools/a/,Tool A (again),ledger\nhttps://example.org/tools/c,Tool C,scout\nhttps://example.org/tools/b ,Tool B (again),ledger" },
     check: (i, sub) => csvCheck(i.csv, i.key_column, sub),
+  },
+  "csv.to_json": {
+    name: "Convert a CSV to JSON",
+    inputs(i) {
+      bad(typeof i.csv === "string" && i.csv.length <= 64 * 1024, "inputs.csv is required, up to 64 KB.", "inputs.csv");
+      try { csvToJson(i.csv); } catch (e) { throw fail(400, "invalid_input", `inputs.csv can't be used: ${e.message}`, "inputs.csv"); }
+      return { csv: i.csv };
+    },
+    describe: (i) => `Convert ${table(i.csv).rows.length} CSV rows to JSON`,
+    sample: { csv: "name,city,plan\nAsha,Mumbai,pro\nBen,Leeds,free\nChloe,Austin,team" },
+    check(i, sub) {
+      const want = csvToJson(i.csv);
+      let got = null, why = "";
+      try { got = JSON.parse(sub.output_csv ?? ""); } catch (e) { why = e.message; }
+      const c = (label, passed, detail) => ({ label, passed, detail: passed ? "" : detail });
+      return [
+        c("Output is valid JSON", got !== null, why),
+        c("One object per CSV row", Array.isArray(got) && got.length === JSON.parse(want).length, `Expected ${JSON.parse(want).length} objects.`),
+        c("Every value matches the CSV", sub.output_csv === want, "Some keys or values differ from the CSV."),
+        c("sha256 matches the output", sha256(sub.output_csv ?? "") === sub.sha256, "The hash doesn't match the submitted output."),
+      ];
+    },
   },
   "leads.extract": {
     name: "Pull leads from a list",
@@ -139,10 +161,11 @@ function publicJob(j, me) {
     // Outsiders only ever see hashes and counts. A dedupe verifier works blind: it gets the inputs, derives the
     // output itself and commits its own hash before it can see the executor's.
     result: !j.result ? null
-      : me && j.capability === "csv.dedupe" && canVerify(me, j) ? null
+      : me && ["csv.dedupe", "csv.to_json"].includes(j.capability) && canVerify(me, j) ? null
       : party ? j.result : { sha256: j.result.sha256, summary: j.result.summary },
     payer_name: userName(j.payer),
     executor_owner: j.executor ? userName(S.agents[j.executor]?.owner_id) : null,
+    executor_full: j.executor ? fullName(j.executor) : null,
     passes: j.verdicts.filter((v) => v.counted === "pass").length,
     escrow: balance(`escrow:${j.id}`),
     you: me ? { party, can_cancel: me.principal === j.payer && ["open", "assigned"].includes(j.status) } : null,
@@ -274,7 +297,8 @@ route("GET /v1/agents/:handle", (_req, _b, p) => {
 });
 
 function validCaps(caps) {
-  bad(Array.isArray(caps) && caps.length >= 1 && caps.length <= 5, "capabilities must list 1 to 5 entries.", "capabilities");
+  if (caps === undefined) return []; // an agent that only hires needs no capabilities
+  bad(Array.isArray(caps) && caps.length <= 5, "capabilities must list up to 5 entries.", "capabilities");
   return caps.map((c, i) => {
     bad([...Object.keys(CAPS), VERIFY_CAP].includes(c?.name), `capabilities[${i}].name must be one of: ${[...Object.keys(CAPS), VERIFY_CAP].join(", ")}.`, `capabilities[${i}].name`);
     return { name: c.name, price: c.name === VERIFY_CAP ? VERIFIER_FEE : int(c.price, `capabilities[${i}].price`, 50, 100000) };
