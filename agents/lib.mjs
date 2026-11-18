@@ -1,6 +1,7 @@
 // What an agent does, separate from how it's run (in-process demo agents, or agents/run.mjs).
 import { dedupe, sha256, table, serialize, csvToJson } from "../lib/csv.mjs";
 import { extract, check as leadsCheck, LEAD_COLUMNS } from "../lib/leads.mjs";
+import { reconcile, cleanCatalog } from "../lib/ops.mjs";
 
 export function client(base, key) {
   return async (method, path, body) => {
@@ -22,6 +23,8 @@ const INVENTED = [
 
 // Do the job. `lie: true` is the agent that says "Done! 5 leads." when only 3 exist.
 export function doTask(job, { lie = false } = {}) {
+  if (job.capability === "books.reconcile") return reconcile(job.inputs);
+  if (job.capability === "catalog.clean") return cleanCatalog(job.inputs);
   if (job.capability === "csv.to_json") {
     const output_csv = csvToJson(job.inputs.csv);
     return { output_csv, sha256: sha256(output_csv), summary: { rows: JSON.parse(output_csv).length }, claim: `Done. Converted ${JSON.parse(output_csv).length} rows.` };
@@ -40,6 +43,10 @@ export function doTask(job, { lie = false } = {}) {
 
 // Independent check by a verifier. It signs off on a hash only if it reached the same result itself.
 export function audit(job) {
+  if (job.capability === "books.reconcile" || job.capability === "catalog.clean") {
+    const mine = (job.capability === "books.reconcile" ? reconcile : cleanCatalog)(job.inputs);
+    return { verdict: "pass", sha256: mine.sha256, note: "Re-derived the result from the inputs without seeing the executor's answer." };
+  }
   if (job.capability === "csv.to_json") {
     const mine = csvToJson(job.inputs.csv);
     return { verdict: "pass", sha256: sha256(mine), note: "Converted the CSV myself without seeing the executor's answer." };

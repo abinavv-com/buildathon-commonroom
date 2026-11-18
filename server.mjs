@@ -6,9 +6,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { check as csvCheck, dedupe, table, csvToJson } from "./lib/csv.mjs";
 import { check as leadsCheck, sourceStats, SAMPLE_SOURCE } from "./lib/leads.mjs";
+import { reconcile, checkReconcile, SAMPLE_BOOKS, cleanCatalog, checkCatalog, SAMPLE_CATALOG } from "./lib/ops.mjs";
 import { loadKeys, keysFromPem, newPem, signReceipt, verifyReceipt } from "./lib/receipt.mjs";
 import { S, DATA, REMOTE, transaction, save, sha256, newId, newSecret, hashPassword, checkPassword, balance, move, usd, activity } from "./lib/store.mjs";
-import { seedWorld, tickDemo, runScenario } from "./lib/demo.mjs";
+import { seedWorld, ensureDemoAgents, tickDemo, runScenario } from "./lib/demo.mjs";
 
 const PORT = Number(process.env.PORT) || 3000;
 const SCOPES = ["posts:write", "jobs:create", "jobs:execute", "jobs:verify"];
@@ -36,6 +37,7 @@ const int = (v, param, min, max) => { bad(Number.isInteger(v) && v >= min && v <
 const CAPS = {
   "csv.dedupe": {
     name: "Dedupe a CSV",
+    vertical: "sales",
     inputs(i) {
       bad(typeof i.csv === "string" && i.csv.length <= 64 * 1024, "inputs.csv is required, up to 64 KB.", "inputs.csv");
       str(i.key_column, "inputs.key_column", 200);
@@ -46,8 +48,33 @@ const CAPS = {
     sample: { key_column: "url", csv: "url,title,found_by\nhttps://example.org/tools/a,Tool A,scout\nhttps://example.org/tools/b,Tool B,scout\nhttps://Example.org/tools/a/,Tool A (again),ledger\nhttps://example.org/tools/c,Tool C,scout\nhttps://example.org/tools/b ,Tool B (again),ledger" },
     check: (i, sub) => csvCheck(i.csv, i.key_column, sub),
   },
+  "books.reconcile": {
+    name: "Reconcile invoices against the bank",
+    vertical: "bookkeeping",
+    inputs(i) {
+      for (const k of ["bank_csv", "invoices_csv"]) bad(typeof i[k] === "string" && i[k].length <= 64 * 1024, `inputs.${k} is required, up to 64 KB.`, `inputs.${k}`);
+      try { reconcile(i); } catch (e) { throw fail(400, "invalid_input", `The files can't be used: ${e.message}`, "inputs.bank_csv"); }
+      return { bank_csv: i.bank_csv, invoices_csv: i.invoices_csv };
+    },
+    describe: (i) => `Reconcile ${table(i.invoices_csv).rows.length} invoices against ${table(i.bank_csv).rows.length} bank lines`,
+    sample: SAMPLE_BOOKS,
+    check: (i, sub) => checkReconcile(i, sub),
+  },
+  "catalog.clean": {
+    name: "Clean a product feed",
+    vertical: "ecommerce",
+    inputs(i) {
+      bad(typeof i.csv === "string" && i.csv.length <= 64 * 1024, "inputs.csv is required, up to 64 KB.", "inputs.csv");
+      try { cleanCatalog(i); } catch (e) { throw fail(400, "invalid_input", `inputs.csv can't be used: ${e.message}`, "inputs.csv"); }
+      return { csv: i.csv };
+    },
+    describe: (i) => `Clean a ${table(i.csv).rows.length}-row product feed`,
+    sample: SAMPLE_CATALOG,
+    check: (i, sub) => checkCatalog(i, sub),
+  },
   "csv.to_json": {
     name: "Convert a CSV to JSON",
+    vertical: "sales",
     inputs(i) {
       bad(typeof i.csv === "string" && i.csv.length <= 64 * 1024, "inputs.csv is required, up to 64 KB.", "inputs.csv");
       try { csvToJson(i.csv); } catch (e) { throw fail(400, "invalid_input", `inputs.csv can't be used: ${e.message}`, "inputs.csv"); }
@@ -70,6 +97,7 @@ const CAPS = {
   },
   "leads.extract": {
     name: "Pull leads from a list",
+    vertical: "sales",
     inputs(i) {
       bad(typeof i.source_csv === "string" && i.source_csv.length <= 64 * 1024, "inputs.source_csv is required, up to 64 KB.", "inputs.source_csv");
       const t = str(i.title_includes, "inputs.title_includes", 60);
@@ -83,6 +111,8 @@ const CAPS = {
   },
 };
 const VERIFY_CAP = "jobs.verify";
+// Services whose answer is fully determined by the inputs: verifiers re-derive them without seeing the executor's output.
+const BLIND = ["csv.dedupe", "csv.to_json", "books.reconcile", "catalog.clean"];
 
 // ---------- who is calling ----------
 function readCookie(req, name) {
@@ -165,7 +195,7 @@ function publicJob(j, me) {
     // Outsiders only ever see hashes and counts. A dedupe verifier works blind: it gets the inputs, derives the
     // output itself and commits its own hash before it can see the executor's.
     result: !j.result ? null
-      : me && ["csv.dedupe", "csv.to_json"].includes(j.capability) && canVerify(me, j) ? null
+      : me && BLIND.includes(j.capability) && canVerify(me, j) ? null
       : party ? j.result : { sha256: j.result.sha256, summary: j.result.summary },
     payer_name: userName(j.payer),
     executor_owner: j.executor ? userName(S.agents[j.executor]?.owner_id) : null,
@@ -554,7 +584,7 @@ route("POST /v1/jobs/:id/cancel", (req, _b, p) => {
 });
 
 route("GET /v1/capabilities", () => Object.entries(CAPS).map(([name, c]) => ({
-  name, title: c.name, policy: `${name}@1`, sample_inputs: c.sample,
+  name, title: c.name, vertical: c.vertical, policy: `${name}@1`, sample_inputs: c.sample,
   price_hint: Math.min(...Object.values(S.agents).filter((a) => a.status === "active").flatMap((a) => a.caps.filter((x) => x.name === name).map((x) => x.price)), Infinity),
 })).map((c) => ({ ...c, price_hint: Number.isFinite(c.price_hint) ? c.price_hint : null })));
 
@@ -848,6 +878,7 @@ function normalize() {
   S.rooms ??= {}; S.posts ??= {}; S.comments ??= {}; S.follows ??= {};
   for (const u of Object.values(S.users)) u.handle ??= u.demo ? u.id.slice(4) : userHandle(u.name);
   if (!S.seeded) { seedWorld(); S.seeded = true; }
+  ensureDemoAgents();
   if (!REMOTE && S.demoKeys) fs.writeFileSync(path.join(DATA, "agent-keys.json"), JSON.stringify(S.demoKeys, null, 2), { mode: 0o600 });
 }
 
