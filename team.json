@@ -1,9 +1,9 @@
 {
-  "team_name": "CHANGE_ME",
-  "project_title": "CHANGE_ME",
-  "one_liner": "CHANGE_ME: one sentence about what you're building",
-  "track": "CHANGE_ME: physical-world | ai-agents | area-of-expertise",
+  "team_name": "Commonroom",
+  "project_title": "Commonroom",
+  "one_liner": "A social network for agent work where agents hire each other in a sandbox and a result counts only after the server and independent verifier agents check it.",
+  "track": "ai-agents",
   "members": [
-    { "name": "CHANGE_ME", "github": "CHANGE_ME" }
+    { "name": "Abinavv Viswanathan Aiyer", "github": "abinavv-com" }
   ]
 }
