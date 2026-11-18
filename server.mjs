@@ -683,6 +683,49 @@ route("GET /v1/home", (req) => {
   };
 });
 
+// Analytics: platform-wide, computed from the jobs, the ledger and the activity log. Public: it holds no private data.
+route("GET /v1/analytics", () => {
+  const jobs = Object.values(S.jobs);
+  const ended = jobs.filter((j) => ["succeeded", "failed", "expired", "cancelled"].includes(j.status));
+  const sum = (kind) => S.ledger.filter((e) => e.kind === kind).reduce((s, e) => s + e.amount, 0);
+  const settleMs = ended.map((j) => j.updated_at - j.created_at).sort((a, b) => a - b);
+  const pct = (p) => (settleMs.length ? settleMs[Math.min(settleMs.length - 1, Math.floor(p * settleMs.length))] : null);
+  // 30 buckets over a window that fits the activity (10 to 60 minutes), so a live demo fills the chart.
+  const now = Date.now(), first = Math.min(now, ...jobs.map((j) => j.created_at));
+  const span = Math.min(60, Math.max(10, Math.ceil((now - first) / 60000) + 1)) * 60000, step = span / 30, start = now - span;
+  const timeline = Array.from({ length: 30 }, (_, i) => ({ t: start + i * step, verified: 0, refunded: 0 }));
+  for (const j of ended) {
+    const b = timeline[Math.min(29, Math.floor((j.updated_at - start) / step))];
+    if (b) b[j.status === "succeeded" ? "verified" : "refunded"]++;
+  }
+  const failures = {};
+  for (const j of jobs) for (const c of j.checks) if (!c.passed) failures[c.label] = (failures[c.label] ?? 0) + 1;
+  const verifierPayouts = S.ledger.filter((e) => e.kind === "payout" && S.agents[e.agent]?.caps.some((c) => c.name === VERIFY_CAP)).reduce((s, e) => s + e.amount, 0);
+  return {
+    totals: {
+      jobs: jobs.length, active: jobs.length - ended.length,
+      verified: jobs.filter((j) => j.status === "succeeded").length, refunded: ended.filter((j) => j.status !== "succeeded").length,
+      gmv: sum("escrow_hold"), paid_to_agents: sum("payout") - verifierPayouts, paid_to_verifiers: verifierPayouts,
+      platform_fees: sum("platform_fee"), refunded_amount: sum("refund"),
+      in_escrow: jobs.reduce((s, j) => s + balance(`escrow:${j.id}`), 0),
+      blocked: S.activity.filter((a) => a.kind === "blocked").length,
+    },
+    settle_ms: { p50: pct(0.5), p90: pct(0.9) },
+    timeline,
+    failures: Object.entries(failures).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count),
+    by_capability: Object.keys(CAPS).map((name) => {
+      const js = jobs.filter((j) => j.capability === name);
+      return { name, jobs: js.length, verified: js.filter((j) => j.status === "succeeded").length, revenue: js.filter((j) => j.status === "succeeded").reduce((s, j) => s + j.price, 0) };
+    }),
+    agents: Object.values(S.agents).filter((a) => a.status !== "pending" && a.caps.length).map((a) => {
+      const r = reputation(a.handle);
+      const done = r.verified + r.rejected;
+      return { handle: a.handle, full_name: fullName(a.handle), role: a.caps.some((c) => c.name === VERIFY_CAP) ? "verifier" : "executor",
+        jobs: done, verified: r.verified, rejected: r.rejected, verdicts: r.verdicts, earned: r.earned, pass_rate: done ? r.verified / done : null };
+    }).sort((x, y) => y.earned - x.earned),
+  };
+});
+
 // Activity and stats
 route("GET /v1/activity", () => S.activity.slice(-80));
 route("GET /v1/stats", () => {
