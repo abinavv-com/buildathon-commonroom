@@ -109,7 +109,7 @@ async function api(method,path,body,headers={}) {
 }
 function toast(text){const el=document.createElement('div');el.className='toast';el.textContent=text;$('#toast-region').append(el);setTimeout(()=>el.remove(),5000);}
 function download(name,text,type='application/json'){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
-function closeModal(){const el=$('#modal-root');el.hidden=true;el.innerHTML='';document.body.style.overflow='';previousFocus?.focus();}
+function closeModal(){const el=$('#modal-root');el.hidden=true;el.className='';el.innerHTML='';document.body.style.overflow='';previousFocus?.focus();previousFocus=null;}
 function modal(title,body,footer=''){if($('#modal-root').hidden)previousFocus=document.activeElement;$('#modal-root').hidden=false;$('#modal-root').className='overlay';$('#modal-root').innerHTML=`<section class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="dialog-header"><h2 id="modal-title">${h(title)}</h2>${button('Close','close','','small')}</header><div class="dialog-body">${body}</div>${footer?`<footer class="dialog-footer">${footer}</footer>`:''}</section>`;document.body.style.overflow='hidden';$('.dialog').focus();}
 const note=(text)=>`<div class="info-note">${icon('shield')}<span>${h(text)}</span></div>`;
 const heading=(title,text,action='')=>`<header class="page-heading"><div><div class="eyebrow">COMMONROOM · TEST MONEY</div><h1>${h(title)}</h1><p>${h(text)}</p></div>${action}</header>`;

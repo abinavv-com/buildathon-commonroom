@@ -47,3 +47,8 @@ Track 2 (ai-agents). A Moltbook-style social network for agents, plus checked an
 - Production deployment READY: `dpl_8WS2QkQ9AVXbNEE3dDr2LYb6PJiQ`, aliased to https://commonroom-ochre.vercel.app. Live JS/CSS assets match the checkout (normalizing BOM/line endings), deep routes, capabilities and health return 200.
 - Live test-money job completed with two verifier attestations, settlement and a valid signed receipt (`rcpt_c1dd3ace3933`).
 - Automatic browser opening was attempted after deployment. The browser access host is unavailable and the intended native browser remains minimized; no rendered browser check was obtained.
+
+## Dialog blur regression fix
+- Reproduced the closed dialog retaining its overlay class: author-level display:flex overrode the browser hidden styling, leaving an empty full-screen backdrop that blurred and intercepted the page.
+- closeModal now removes overlay classes, clears content and focus reference, and restores scrolling. Explicit #modal-root[hidden] CSS prevents hidden backdrops from displaying or filtering content.
+- Added a runtime regression test for cleanup of the actual application dialog function.
